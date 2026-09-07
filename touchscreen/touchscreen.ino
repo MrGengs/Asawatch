@@ -201,7 +201,8 @@ static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf1 = NULL;
 static lv_color_t *buf2 = NULL;
 static lv_disp_drv_t disp_drv;
-static lv_indev_drv_t indev_drv;
+/* Tidak ada lv_indev_drv_t indev_drv lagi -- lihat catatan touch.sleep() di
+ * setup(): indev penunjuk sengaja tidak pernah didaftarkan. */
 
 static int16_t last_touch_x = 0, last_touch_y = 0;
 
@@ -290,13 +291,6 @@ static void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
   gfx->draw16bitRGBBitmap(area->x1, area->y1, (uint16_t *)&color_p->full, w, h);
 #endif
   lv_disp_flush_ready(drv);
-}
-
-static void my_touch_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
-  touch_poll();
-  data->point.x = last_touch_x;
-  data->point.y = last_touch_y;
-  data->state = touch_down ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
 }
 
 /* ================= Layar: hidup / mati =================
@@ -2788,10 +2782,14 @@ void setup() {
     Serial.printf("[ok] touch: %s\n", touch.getModelName());
   }
   delay(150);
-  /* IRQ hanya dipasang kalau chipnya benar-benar menjawab. Pada board yang
-   * sentuhannya rusak, pin IRQ yang menggantung bisa memicu interupsi liar, dan
-   * setiap satu di antaranya membuat loop() melewati ppg_update(). */
-  if (touch_ada) attachInterrupt(digitalPinToInterrupt(TOUCH_IRQ), touch_isr, FALLING);
+  /* touch.begin() TETAP wajib dipanggil lebih dulu (lihat catatan URUTAN INIT
+   * PENTING di atas gfx->begin()) supaya CST816T tidak mengunci baseline salah,
+   * tapi wajah ini memang tidak berlayar sentuh (lihat catatan di
+   * halaman_evaluasi()), jadi begitu chip terdeteksi ia langsung disuruh
+   * sleep() lewat register CST8xx_REG_SLEEP -- turun dari mode scan aktif ke
+   * mode hemat daya mikroamp. IRQ tidak pernah dipasang dan indev LVGL tidak
+   * pernah didaftarkan, jadi chip tidak pernah dibangunkan lagi. */
+  if (touch_ada) touch.sleep();
 
   if (!gfx->begin()) Serial.println("[err] gfx->begin() gagal");
   gfx->fillScreen(RGB565_BLACK);
@@ -2816,15 +2814,10 @@ void setup() {
   disp_drv.draw_buf = &draw_buf;
   lv_disp_drv_register(&disp_drv);
 
-  /* Indev penunjuk hanya didaftarkan kalau chip sentuhnya menjawab. Chip yang
-   * rusak dan terkunci di "jari menempel" membuat LVGL melihat tekanan abadi,
-   * dan gejalanya layar yang seolah membeku. */
-  if (touch_ada) {
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = my_touch_read;
-    lv_indev_drv_register(&indev_drv);
-  }
+  /* Indev penunjuk SENGAJA tidak pernah didaftarkan: touch.sleep() di atas
+   * membuat CST816T tidak pernah lagi mengirim IRQ, dan wajah ini memang tidak
+   * berlayar sentuh (lihat catatan di halaman_evaluasi()) -- mendaftarkan
+   * indev cuma menambah satu pembacaan kosong per tick LVGL tanpa gunanya. */
 
   /* RTC berbagi bus I2C dengan touch, dan Wire sudah di-begin di atas. */
   rtc_begin();
