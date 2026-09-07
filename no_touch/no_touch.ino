@@ -573,6 +573,14 @@ static lv_obj_t *sat_hr, *sat_sp, *sat_gl;                   /* satuan        */
 static lv_obj_t *obj_ling1, *obj_ling2;
 static lv_obj_t *lbl_home_jam, *lbl_home_menit, *lbl_home_tanggal;
 
+/* Indikator nomor unit -- "02" dkk. dari aw_label_get(), pojok kanan atas,
+ * cuma kelihatan 5 detik di boot dingin (dipasang di setup(), lihat
+ * label_unit_sembunyi_pada). Dibuat tersembunyi di sini supaya tidak pernah
+ * nongol pada refresh_cb() sebelum setup() sempat memutuskan mau
+ * menampilkannya atau tidak. */
+static lv_obj_t *lbl_home_unit;
+static uint32_t  label_unit_sembunyi_pada = 0;   /* 0 = tidak sedang tampil */
+
 /* ================= Helper pembuat widget ================= */
 
 /* Kotak polos tanpa style bawaan tema. */
@@ -1068,6 +1076,25 @@ static void build_home(void) {
    * bug yang sama persis, sudah diperbaiki lewat genhomefont.sh. */
   lbl_home_tanggal = mk_label(scr_home, "--", &font_home_kecil, C_PUTIH,
                               HOME_TANGGAL_X, HOME_TANGGAL_Y);
+
+  /* Nomor unit, pojok kanan atas -- align dipakai (bukan koordinat tetap
+   * seperti label lain di atas) supaya tetap nempel ke pojok berapa pun
+   * lebar teksnya ("02" vs "99"). Isi & tampilannya diputuskan setup(),
+   * bukan di sini -- lihat label_unit_sembunyi_pada.
+   *
+   * Posisi disamakan dengan varian sentuh (touchscreen.ino): sejajar
+   * horizontal ke PUSAT badan baterai (BATT_Y_HOME..+BATT_H), dihitung dari
+   * tinggi baris label yang sebenarnya (lv_obj_get_height() sesudah
+   * update_layout()) supaya tetap sejajar kalau BATT_Y_HOME/BATT_H atau
+   * ukuran fontnya berubah nanti, lalu digeser +5 px turun dan -22 px dari
+   * tepi kanan (bukan -6) -- hasil dua kali penyesuaian visual eksplisit
+   * (-18 kekanan, -28 kekiri, -22 pas). */
+  lbl_home_unit = mk_label(scr_home, "", &lv_font_montserrat_12, C_PUTIH, 0, 0);
+  lv_obj_align(lbl_home_unit, LV_ALIGN_TOP_RIGHT, -22, 0);
+  lv_obj_update_layout(lbl_home_unit);
+  lv_obj_set_y(lbl_home_unit,
+              BATT_Y_HOME + BATT_H / 2 - lv_obj_get_height(lbl_home_unit) / 2 + 5);
+  lv_obj_add_flag(lbl_home_unit, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ================= Layar pembuka =================
@@ -1489,6 +1516,187 @@ static void batt_buat(lv_obj_t *parent, batt_widget_t *w, int kanan, int y) {
   batt_gambar(w, 0, false);
 }
 
+/* ---- Toast "sedang mengisi": cincin mengisi singkat saat charger baru dicolok ----
+ * Petir di ikon baterai (w->petir, di atas) sudah menandai "sedang mengisi"
+ * SELAMA kabel tertancap -- itu bertahan, bukan sesaat. Yang diminta di sini
+ * beda: umpan balik yang lebih besar dan lebih hidup daripada satu glyph kecil
+ * di pojok -- cincin yang MENGISI dari 0 sampai persen baterai sungguhan,
+ * seperti pengisian dayanya sendiri -- lalu HILANG SENDIRI setelah beberapa
+ * detik supaya tidak menutupi wajah jam selamanya selama jam dicas semalaman.
+ *
+ * Angka persennya SENGAJA TIDAK ditulis -- persen dari tegangan Li-Po cuma
+ * akurat +-5..10% (lihat battery.h) dan saat mengisi malah bias ke atas (fase
+ * CV menahan tegangan dekat 4,2V jauh sebelum sel benar-benar penuh, lihat
+ * komentar baterai di refresh_cb()). Menulis angka persis di tengah animasi
+ * charger akan MENJANJIKAN ketelitian yang tidak dimiliki jam ini, persis
+ * alasan kenapa ikon baterai di w->petir juga cuma tiga kotak, bukan angka --
+ * tapi GERAKAN mengisinya sendiri (sebatas seberapa penuh, bukan angkanya)
+ * tetap dipertahankan, cuma teksnya "MENGISI DAYA" yang tetap, tidak ikut
+ * berubah mengikuti cincin.
+ *
+ * Ditaruh di lv_layer_top(), bukan sebagai anak scr_wajah/scr_home: layer itu
+ * digambar di atas layar aktif yang mana pun tanpa peduli lv_scr_load() yang
+ * dipanggil halaman_set(), jadi cukup SATU objek, tidak perlu digandakan dua
+ * seperti batt_wajah/batt_home.
+ *
+ * Dipicu dari transisi isi_lalu 0->1 di refresh_cb() -- persis titik yang
+ * sudah memanggil layar_nyala_sementara(), dengan alasan sama: itulah satu-
+ * satunya saat charger BARU masuk, bukan setiap putaran selama masih
+ * tercolok. */
+#define CAS_TOAST_MS      3000   /* lama toast tampil sebelum mulai memudar   */
+#define CAS_TOAST_FADE_MS  250   /* lama transisi memudar keluar              */
+#define CAS_TOAST_ISI_MS   900   /* lama cincin mengisi dari 0 ke persen asli */
+#define CAS_TOAST_KEDIP_MS 500   /* lama satu arah kedipan petir (naik/turun) */
+#define CAS_TOAST_D        110   /* diameter cincin + lingkaran latar         */
+#define CAS_TOAST_W          8   /* tebal garis cincin                        */
+
+static lv_obj_t   *cas_toast;        /* kontainer tak terlihat, anak lv_layer_top() */
+static lv_obj_t   *cas_toast_latar;  /* lingkaran gelap di belakang cincin     */
+static lv_obj_t   *cas_toast_cincin; /* cincin yang mengisi sampai persen     */
+static lv_obj_t   *cas_toast_teks;   /* "MENGISI DAYA" tetap, di tengah cincin */
+static lv_obj_t   *cas_toast_petir;  /* simbol petir kecil di atas teks, berkedip */
+static lv_timer_t *cas_toast_timer = NULL;
+
+static void cas_toast_opa_cb(void *obj, int32_t v) {
+  lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
+}
+
+/* Cuma menggerakkan nilai cincin -- tidak ada label yang ikut ditulis ulang
+ * di sini, karena tulisannya ("MENGISI DAYA") tetap sepanjang waktu. */
+static void cas_toast_isi_cb(void *obj, int32_t v) {
+  lv_arc_set_value((lv_obj_t *)obj, v);
+}
+
+static void cas_toast_sembunyi_cb(lv_anim_t *a) {
+  (void)a;
+  lv_obj_add_flag(cas_toast, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Timer sekali-jalan: hentikan kedipan petir, lalu pudarkan seluruh toast
+ * sampai tembus pandang dan sembunyikan. lv_timer_del() di baris pertama,
+ * BUKAN di akhir -- timer LVGL tidak boleh menghapus dirinya sendiri di
+ * tengah callback-nya sendiri kalau masih ada kode sesudahnya yang bisa
+ * memicu ulang (di sini tidak, tapi pola ini konsisten dipakai di seluruh
+ * berkas untuk timer sekali-jalan). */
+static void cas_toast_tutup_cb(lv_timer_t *t) {
+  lv_timer_del(t);
+  cas_toast_timer = NULL;
+  lv_anim_del(cas_toast_petir, NULL);
+  lv_anim_del(cas_toast_cincin, NULL);   /* jaga-jaga kalau isi>900ms belum tuntas */
+
+  lv_anim_t a;
+  lv_anim_init(&a);
+  lv_anim_set_var(&a, cas_toast);
+  lv_anim_set_exec_cb(&a, cas_toast_opa_cb);
+  lv_anim_set_values(&a, LV_OPA_COVER, LV_OPA_TRANSP);
+  lv_anim_set_time(&a, CAS_TOAST_FADE_MS);
+  lv_anim_set_ready_cb(&a, cas_toast_sembunyi_cb);
+  lv_anim_start(&a);
+}
+
+/* Bangun toast sekali di setup(), tersembunyi. Sama seperti splash: objeknya
+ * dibuat lebih dulu dan cuma disembunyikan/ditampilkan sesudahnya --
+ * membuat/menghapus objek LVGL berulang kali di konteks loop() jauh lebih
+ * mahal daripada menggeser satu flag. */
+static void cas_toast_bangun(void) {
+  cas_toast = lv_obj_create(lv_layer_top());
+  lv_obj_remove_style_all(cas_toast);
+  lv_obj_clear_flag(cas_toast, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(cas_toast, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_size(cas_toast, CAS_TOAST_D, CAS_TOAST_D);
+  lv_obj_align(cas_toast, LV_ALIGN_CENTER, 0, 0);
+
+  /* Lingkaran gelap di belakang -- tanpa ini angka & garis cincin sulit
+   * dibaca di atas wajah jam/gradasi home yang warnanya berubah-ubah. Radius
+   * LV_RADIUS_CIRCLE, bukan angka tetap, supaya tetap bulat sempurna kalau
+   * CAS_TOAST_D diubah nanti. */
+  cas_toast_latar = mk_box(cas_toast, 0, 0, CAS_TOAST_D, CAS_TOAST_D, C_KARTU,
+                           LV_RADIUS_CIRCLE);
+  lv_obj_set_style_border_width(cas_toast_latar, 1, 0);
+  lv_obj_set_style_border_color(cas_toast_latar, lv_color_hex(C_KARTU_BRD), 0);
+  lv_obj_set_style_border_opa(cas_toast_latar, LV_OPA_COVER, 0);
+
+  /* Cincin dibangun manual (bukan mk_cincin(), yang patokan pusatnya
+   * CINCIN_CX/CY dari halaman kedua) -- persis gaya mk_cincin(), rotasi 270
+   * supaya 0% mulai di jam 12, arah sama dengan tiga cincin metrik lain. */
+  cas_toast_cincin = lv_arc_create(cas_toast);
+  lv_obj_remove_style(cas_toast_cincin, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(cas_toast_cincin, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_size(cas_toast_cincin, CAS_TOAST_D, CAS_TOAST_D);
+  lv_obj_set_pos(cas_toast_cincin, 0, 0);
+  lv_arc_set_rotation(cas_toast_cincin, 270);
+  lv_arc_set_bg_angles(cas_toast_cincin, 0, 360);
+  lv_arc_set_range(cas_toast_cincin, 0, 100);      /* langsung persen, tanpa skala */
+  lv_arc_set_value(cas_toast_cincin, 0);
+  lv_obj_set_style_arc_width(cas_toast_cincin, CAS_TOAST_W, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(cas_toast_cincin, CAS_TOAST_W, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(cas_toast_cincin, lv_color_hex(C_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(cas_toast_cincin, lv_color_hex(C_ISI), LV_PART_INDICATOR);
+  lv_obj_set_style_arc_rounded(cas_toast_cincin, true, LV_PART_MAIN);
+  lv_obj_set_style_arc_rounded(cas_toast_cincin, true, LV_PART_INDICATOR);
+
+  cas_toast_petir = mk_label(cas_toast, LV_SYMBOL_CHARGE, &lv_font_montserrat_12,
+                             C_ISI, 0, 0);
+  lv_obj_align(cas_toast_petir, LV_ALIGN_CENTER, 0, -14);
+
+  cas_toast_teks = mk_label(cas_toast, "MENGISI DAYA", &lv_font_montserrat_12,
+                            C_PUTIH, 0, 0);
+  lv_obj_align(cas_toast_teks, LV_ALIGN_CENTER, 0, 8);
+
+  lv_obj_add_flag(cas_toast, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Tampilkan (atau, kalau sedang tampil, mulai ulang) toastnya. Membatalkan
+ * timer/animasi lama lebih dulu supaya cabut-colok cepat berturut-turut tidak
+ * menumpuk beberapa penutup yang berebut menyembunyikan objek yang sama. */
+static void cas_toast_tampilkan(void) {
+  if (cas_toast_timer) {
+    lv_timer_del(cas_toast_timer);
+    cas_toast_timer = NULL;
+  }
+  lv_anim_del(cas_toast, NULL);
+  lv_anim_del(cas_toast_petir, NULL);
+  lv_anim_del(cas_toast_cincin, NULL);
+
+  lv_obj_set_style_opa(cas_toast, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(cas_toast, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(cas_toast);
+
+  lv_arc_set_value(cas_toast_cincin, 0);
+
+  /* Cincin mengisi SEKALI dari 0 ke persen baterai sungguhan (battery_percent(),
+   * sama seperti yang menyalakan/mematikan kotak ikon baterai) -- bukan
+   * loop tanpa akhir, karena tujuannya menunjukkan GERAKAN mengisi, bukan
+   * sekadar berputar tanpa arti. Dipanggil di sini (bukan lewat parameter)
+   * supaya selalu memakai bacaan terbaru persis saat toast tampil. */
+  lv_anim_t isi;
+  lv_anim_init(&isi);
+  lv_anim_set_var(&isi, cas_toast_cincin);
+  lv_anim_set_exec_cb(&isi, cas_toast_isi_cb);
+  lv_anim_set_values(&isi, 0, battery_percent());
+  lv_anim_set_time(&isi, CAS_TOAST_ISI_MS);
+  lv_anim_set_path_cb(&isi, lv_anim_path_ease_out);
+  lv_anim_start(&isi);
+
+  /* Kedipan petir: penanda "masih mengisi" yang hidup selama toast tampil,
+   * terpisah dari animasi cincin di atas (yang cuma main sekali lalu diam di
+   * posisi akhirnya). Berulang terus -- dihentikan oleh cas_toast_tutup_cb(),
+   * bukan oleh hitungan ulang di sini. */
+  lv_anim_t kedip;
+  lv_anim_init(&kedip);
+  lv_anim_set_var(&kedip, cas_toast_petir);
+  lv_anim_set_exec_cb(&kedip, cas_toast_opa_cb);
+  lv_anim_set_values(&kedip, LV_OPA_30, LV_OPA_COVER);
+  lv_anim_set_time(&kedip, CAS_TOAST_KEDIP_MS);
+  lv_anim_set_playback_time(&kedip, CAS_TOAST_KEDIP_MS);
+  lv_anim_set_repeat_count(&kedip, LV_ANIM_REPEAT_INFINITE);
+  lv_anim_set_path_cb(&kedip, lv_anim_path_ease_in_out);
+  lv_anim_start(&kedip);
+
+  cas_toast_timer = lv_timer_create(cas_toast_tutup_cb, CAS_TOAST_MS, NULL);
+  lv_timer_set_repeat_count(cas_toast_timer, 1);
+}
+
 /* ---- Baris tanggal yang merangkap baris status ----
  * Ini satu-satunya area teks bebas di wajah ini, jadi ia memikul tiga hal
  * sekaligus. Urutan prioritasnya penting dan disengaja:
@@ -1747,8 +1955,13 @@ static void refresh_cb(lv_timer_t *tm) {
       /* Layar dibangunkan saat MULAI mengisi, sebagai satu-satunya umpan balik
        * bahwa kabelnya benar-benar masuk -- jam ini tidak punya LED charger.
        * isi_lalu == -1 dikecualikan supaya boot dalam keadaan tercolok tidak
-       * ikut memicunya; layarnya toh sudah menyala di situ. */
-      if (chg && isi_lalu == 0) layar_nyala_sementara(LAYAR_AUTO_MATI_MS);
+       * ikut memicunya; layarnya toh sudah menyala di situ. Toast animasi
+       * (cas_toast_tampilkan()) memakai gerbang yang sama persis dan untuk
+       * alasan yang sama: hanya pada colokan yang BARU terjadi. */
+      if (chg && isi_lalu == 0) {
+        layar_nyala_sementara(LAYAR_AUTO_MATI_MS);
+        cas_toast_tampilkan();
+      }
       kotak_lalu = kotak;
       isi_lalu   = chg;
       /* Kedua salinan disegarkan bersamaan -- lihat komentar batt_widget_t --
@@ -1767,6 +1980,12 @@ static void refresh_cb(lv_timer_t *tm) {
   if (layar_mati_pada && (int32_t)(millis() - layar_mati_pada) >= 0) {
     if (jam_sedang_mengukur()) layar_mati_pada = millis() + 5000UL;
     else                       layar_set(false);   /* ini mengosongkan tenggatnya */
+  }
+
+  /* Tenggat sembunyi indikator nomor unit -- lihat pemasangannya di setup(). */
+  if (label_unit_sembunyi_pada && (int32_t)(millis() - label_unit_sembunyi_pada) >= 0) {
+    lv_obj_add_flag(lbl_home_unit, LV_OBJ_FLAG_HIDDEN);
+    label_unit_sembunyi_pada = 0;
   }
 
   /* ---- empat metrik + tiga cincin ----
@@ -2425,6 +2644,7 @@ void setup() {
 
   build_wajah();
   build_home();
+  cas_toast_bangun();
   build_splash();
   splash_mulai();
 
@@ -2499,6 +2719,33 @@ void setup() {
    * tombol ukur memang harus menyala, halaman kedua yang tampil sejak frame
    * pertama loop(), bukan menyusul satu putaran refresh_cb() kemudian. */
   halaman_evaluasi();
+
+  /* Tenggat mati layar untuk boot dingin. s_layar_nyala mulai TRUE secara
+   * statis (baris deklarasinya), jadi kalau kabel dicolok SEBELUM tombol
+   * ditahan 3 detik -- reset ini tidak pernah melihat layar bertransisi
+   * mati->nyala, dan layar_nyala_sementara() (yang cuma memasang tenggat pada
+   * transisi itu) tidak pernah dipanggil di jalur ini. Tanpa baris ini layar
+   * menyala SELAMANYA setelah boot dingin sampai diklik manual -- persis
+   * gejala yang dilaporkan: menyalakan sambil dicas tidak pernah mati sendiri,
+   * padahal menyalakan lewat pwr_hidupkan_lagi() (board yang sempat "mati"
+   * tapi tetap hidup karena USB) sudah dibatasi LAYAR_MATI_TOMBOL_MS di sana.
+   * Dipasang langsung ke layar_mati_pada, bukan lewat layar_nyala_sementara(),
+   * justru karena tidak ada transisi untuk dideteksi.
+   *
+   * Kalau ada nomor unit untuk ditampilkan (di bawah), tenggatnya DIPERSINGKAT
+   * ke 5 detik yang sama dengan tenggat sembunyi badge -- begitu "pengecekan"
+   * (badge nomor unit) selesai, layar langsung standby (layar_set(false) di
+   * refresh_cb(), efeknya identik dengan sekali klik PWR, BUKAN tahan 3 detik
+   * yang mematikan sungguhan), bukan menunggu 20 detik lagi. */
+  uint8_t label_unit = aw_label_get();
+  if (label_unit) {
+    lv_label_set_text_fmt(lbl_home_unit, "%02u", (unsigned)label_unit);
+    lv_obj_clear_flag(lbl_home_unit, LV_OBJ_FLAG_HIDDEN);
+    label_unit_sembunyi_pada = millis() + 5000UL;
+    layar_mati_pada           = label_unit_sembunyi_pada;
+  } else {
+    layar_mati_pada = millis() + LAYAR_MATI_TOMBOL_MS;
+  }
 
   net_begin();
 

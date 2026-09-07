@@ -365,7 +365,7 @@ void aw_ble_begin(void) {
    * sekali. 0 = belum diatur, jatuh ke suffix MAC 6-hex seperti biasa. */
   uint8_t label = aw_label_get();
   if (label)
-    snprintf(s_nama, sizeof(s_nama), "AsaWatch %02u", (unsigned)label);
+    snprintf(s_nama, sizeof(s_nama), "Asawatch-%02u", (unsigned)label);
   else
     snprintf(s_nama, sizeof(s_nama), "AsaWatch%02X%02X%02X",
              s_serial[3], s_serial[4], s_serial[5]);

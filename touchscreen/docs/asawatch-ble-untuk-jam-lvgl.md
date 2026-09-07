@@ -224,7 +224,7 @@ sebelum menyambung).
 
 Nama boleh berbeda bentuk tanpa mengubah kontrak apa pun: kalau label uji manual diatur lewat
 konsol serial jam (`id N`, `N` 1-99 — lihat `aw_store.aw_label_get()`), nama BLE-nya jadi
-`AsaWatch NN` (dua digit desimal) alih-alih suffix hex MAC. Ini murni kenyamanan lab untuk
+`Asawatch-NN` (dua digit desimal) alih-alih suffix hex MAC. Ini murni kenyamanan lab untuk
 membedakan banyak unit identik di meja uji — suffix hex dari MAC TERBUKTI bisa kebetulan sama
 pada beberapa unit dari satu batch produksi sekaligus (bukan cuma 4-hex, 6-hex pun pernah
 bertabrakan pada pengujian batch 10 unit) — app tidak perlu tahu bedanya, cukup tampilkan nama
