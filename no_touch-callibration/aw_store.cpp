@@ -202,7 +202,7 @@ void aw_store_begin(void) {
     Serial.printf("[store] ARM_TITIK selamat: index %u -- tombol ukur menyala\n",
                   (unsigned)s_titik.index_);
   if (s_label)
-    Serial.printf("[store] label uji: %u -- nama BLE \"Asawatch-%02u\"\n",
+    Serial.printf("[store] label uji: %u -- nama BLE \"AsaWatch %02u\"\n",
                   (unsigned)s_label, (unsigned)s_label);
   Serial.printf("[store] boot_id=%u, %d entri tersisa di buffer, kalibrasi=%s\n",
                 (unsigned)s_boot_id, tertunda, s_kalib.valid ? "ada" : "kosong");

@@ -90,7 +90,7 @@ void aw_kalibrasi_set(int16_t offset_sis, int16_t offset_dia);
 /* ---- Kalibrasi glukosa (offset, bukan nilai referensi) ----
  * BEDA dari kalibrasi tensi di atas: ini BUKAN bagian protokol kawat. Tidak
  * ada opcode BLE untuk menulisnya -- diset HANYA lewat konsol serial
- * ("glu_offset N", lihat touchscreen.ino), sama seperti label uji "id N" di
+ * ("glu_offset N", lihat no_touch.ino), sama seperti label uji "id N" di
  * bawah. Alasannya: menambah opcode kawat baru (aw_proto.h) mewajibkan
  * perubahan dokumen normatif DAN sisi Flutter pada PR yang sama (lihat
  * catatan di kepala berkas ini) -- sedangkan model glukosa masih EKSPERIMENTAL

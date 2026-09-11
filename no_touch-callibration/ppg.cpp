@@ -731,7 +731,8 @@ static void process_sample(long redVal, long irVal) {
 /* ================= API ================= */
 bool ppg_begin(void) {
   /* I2C_SPEED_STANDARD (100 kHz), BUKAN I2C_SPEED_FAST: begin() memanggil
-   * setClock(), dan 400 kHz membuat touch CST816T tidak stabil di board ini. */
+   * setClock(), dan board ini dipertahankan konservatif di 100 kHz (lihat
+   * catatan Wire.setClock() di touch.ino). */
   s_present = sensor.begin(Wire, I2C_SPEED_STANDARD, MAX30105_ADDRESS);
   if (!s_present) {
     Serial.println("[ppg] MAX30105/30102 tidak terdeteksi di 0x57 "
@@ -743,8 +744,9 @@ bool ppg_begin(void) {
   sensor.setup(LED_BRIGHTNESS, SAMPLE_AVERAGE, LED_MODE,
                SAMPLE_RATE, PULSE_WIDTH, ADC_RANGE);
 
-  /* Dipaksa ulang: kalau versi library apa pun sempat mengubah clock bus,
-   * touch akan rusak. Lebih murah menegaskan daripada mendiagnosanya nanti. */
+  /* Dipaksa ulang: kalau versi library apa pun sempat menaikkan clock bus ke
+   * 400 kHz, ini mengembalikannya ke 100 kHz. Lebih murah menegaskan daripada
+   * mendiagnosanya nanti. */
   Wire.setClock(100000);
 
   /* setup() di atas WAJIB dijalankan -- ia yang menulis seluruh register mode,
@@ -763,8 +765,7 @@ bool ppg_begin(void) {
 
 void ppg_update(void) {
   /* Saat mati: tidak ada satu pun transaksi I2C. Selain hemat daya, ini juga
-   * mengembalikan seluruh jatah bus ke touch CST816T yang datanya hilang
-   * hampir seketika setelah IRQ (lihat catatan di touch.ino). */
+   * mengembalikan seluruh jatah bus ke RTC. */
   if (!s_present || !s_enabled) return;
 
   /* Gate waktu supaya transaksi I2C tidak dilakukan setiap iterasi loop (loop

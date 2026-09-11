@@ -1,6 +1,7 @@
 /*
  * AsaWatch -- wajah jam SATU HALAMAN, LVGL 8.3
- * Board : Waveshare ESP32-C6-Touch-LCD-1.69  (240x280, ST7789V2 + CST816T)
+ * Board : ESP32-C6-LCD-1.69, varian TANPA sentuh (240x280, ST7789V2 saja --
+ * tidak ada CST816T maupun chip sentuh lain di board ini).
  *
  * Acuan piksel: images/wajah_jam_modular_240x280.png, dibuat pada ukuran layar
  * sebenarnya -- jadi setiap koordinat di berkas ini diukur langsung dari
@@ -8,11 +9,11 @@
  *
  * KENAPA SATU HALAMAN
  * Versi lama punya 7 layar dan sebuah menu. Itu masuk akal selama ada layar
- * sentuh. Pada board ini sentuhannya tidak berfungsi (CST816T tidak menjawab
- * di I2C sama sekali), dan menavigasi 7 layar lewat satu tombol BOOT berarti
- * pengguna harus menekan berkali-kali hanya untuk melihat satu angka. Jadi
- * seluruh informasi dipadatkan ke satu wajah yang tidak perlu dinavigasi:
- * empat kartu metrik terlihat bersamaan, dan tidak ada lagi yang tersembunyi.
+ * sentuh. Board ini TIDAK PUNYA chip sentuh sama sekali, dan menavigasi 7
+ * layar lewat satu tombol BOOT berarti pengguna harus menekan berkali-kali
+ * hanya untuk melihat satu angka. Jadi seluruh informasi dipadatkan ke satu
+ * wajah yang tidak perlu dinavigasi: empat kartu metrik terlihat bersamaan,
+ * dan tidak ada lagi yang tersembunyi.
  *
  * Sisi aplikasilah yang kini memegang kendali (BLE), sesuai keputusan pemilik
  * perangkat. Jam menjadi sensor + buffer + penampil.
@@ -78,7 +79,6 @@
 #include <lvgl.h>
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
-#include "TouchDrv.hpp"
 #include "ui_assets.h"
 #include "splash_assets.h"
 
@@ -143,7 +143,7 @@ LV_FONT_DECLARE(font_home_big)
 LV_FONT_DECLARE(font_home_kecil)
 }
 
-/* ---------------- Pin map ESP32-C6-Touch-LCD-1.69 ---------------- */
+/* ---------------- Pin map ESP32-C6-LCD-1.69 (tanpa sentuh) ---------------- */
 #define LCD_SCK    1
 #define LCD_DIN    2
 #define LCD_DC     3
@@ -153,7 +153,6 @@ LV_FONT_DECLARE(font_home_kecil)
 
 #define I2C_SCL    7
 #define I2C_SDA    8
-#define TOUCH_IRQ 11
 
 /* ---- Daya baterai: latch + tombol PWR ----
  * Kedua nomor ini dari BSP resmi Waveshare untuk board ini
@@ -193,94 +192,12 @@ Arduino_GFX *gfx = new Arduino_ST7789(
   0 /* col offset 1 */, 20 /* row offset 1 */,
   0 /* col offset 2 */, 20 /* row offset 2 */);
 
-TouchDrvCSTXXX touch;
-
 /* ---------------- LVGL glue ---------------- */
 #define BUF_LINES 60
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf1 = NULL;
 static lv_color_t *buf2 = NULL;
 static lv_disp_drv_t disp_drv;
-/* Tidak ada lv_indev_drv_t indev_drv lagi -- lihat catatan touch.sleep() di
- * setup(): indev penunjuk sengaja tidak pernah didaftarkan. */
-
-static int16_t last_touch_x = 0, last_touch_y = 0;
-
-/* ---------------- Touch: dibaca saat IRQ ----------------
- * Dipertahankan utuh walau board ini tidak punya sentuh yang berfungsi, supaya
- * satu firmware yang sama tetap jalan di board yang sentuhannya baik. Wajah
- * satu halaman ini memang tidak punya sasaran sentuh apa pun -- tidak ada yang
- * bisa diketuk -- jadi jalur ini kini murni tidak berefek, bukan alternatif
- * kendali.
- *
- * CST816T di board yang sehat mengosongkan byte finger-count hampir seketika
- * setelah IRQ, jadi polling bebas hampir selalu melewatkannya. Data dibaca
- * tepat saat IRQ. */
-#define TOUCH_ADDR      0x15
-#define TOUCH_HOLD_MS   180
-#define TOUCH_MIN_MS    60
-
-static volatile bool touch_irq_flag = false;
-static volatile uint32_t touch_irq_count = 0;
-static bool touch_down = false;
-static bool touch_release_pending = false;
-static uint32_t touch_last_ms = 0;
-static uint32_t touch_press_ms = 0;
-static uint32_t touch_events = 0;
-static uint32_t touch_reads = 0, touch_readerr = 0;
-
-static void IRAM_ATTR touch_isr() {
-  touch_irq_flag = true;
-  touch_irq_count++;
-}
-
-static bool touch_raw_read(uint8_t *b) {
-  Wire.beginTransmission(TOUCH_ADDR);
-  Wire.write((uint8_t)0x00);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom((uint8_t)TOUCH_ADDR, (uint8_t)7) < 7) return false;
-  for (uint8_t i = 0; i < 7; i++) b[i] = Wire.read();
-  return true;
-}
-
-static void touch_poll(void) {
-  if (touch_irq_flag) {
-    touch_irq_flag = false;
-    uint8_t b[7];
-    if (!touch_raw_read(b)) {
-      touch_readerr++;
-    } else {
-      touch_reads++;
-      uint8_t fingers = b[2] & 0x0F;
-      uint8_t evt = b[3] >> 6;                     /* 0=down, 1=lift up, 2=contact */
-      uint16_t x = ((b[3] & 0x0F) << 8) | b[4];
-      uint16_t y = ((b[5] & 0x0F) << 8) | b[6];
-
-      if (evt == 1) {
-        touch_release_pending = true;
-      } else if ((fingers > 0 || evt == 2) && x < SCREEN_W && y < SCREEN_H) {
-        last_touch_x = x;
-        last_touch_y = y;
-        if (!touch_down) touch_press_ms = millis();
-        touch_down = true;
-        touch_release_pending = false;
-        touch_last_ms = millis();
-        touch_events++;
-      }
-    }
-  }
-
-  if (touch_down) {
-    uint32_t now = millis();
-    if (touch_release_pending && (now - touch_press_ms) >= TOUCH_MIN_MS) {
-      touch_down = false;
-      touch_release_pending = false;
-    } else if ((now - touch_last_ms) > TOUCH_HOLD_MS) {
-      touch_down = false;
-      touch_release_pending = false;
-    }
-  }
-}
 
 static void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
   uint32_t w = area->x2 - area->x1 + 1;
@@ -310,13 +227,7 @@ static void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t 
  * panel (kalau dibalik, panel yang masuk sleep sempat terlihat berkedip), dan
  * saat menyalakan, panel dulu -- cahayanya menunggu sampai satu frame utuh
  * tergambar, lihat s_bl_tunda di loop(). */
-/* ~60%, turun dari 204 (~80%). Backlight LED adalah penyerap arus AKTIF
- * terbesar di board ini -- jauh di atas BLE atau sensor mana pun -- dan
- * baterainya cuma 1500 mAh, jadi ini pengungkit hemat daya dengan risiko
- * paling kecil (masih cukup terang dibaca, dicoba langsung di bawah sinar
- * ruangan biasa). Kalau kurang terang di luar ruangan, naikkan lagi -- angka
- * ini bukan batas keras perangkat keras, cuma keseimbangan yang dipilih. */
-#define LCD_BL_TERANG  153
+#define LCD_BL_TERANG  204        /* ~80%, sama dengan yang dipakai setup() */
 
 static bool s_layar_nyala = true;
 static bool s_bl_tunda    = false;
@@ -337,11 +248,6 @@ static bool pwr_daya_lepas = false;
  * sendiri harus sudah ada sebelum pemakaian pertamanya. */
 static bool     s_di_wajah = false;
 static uint32_t s_pulang_home_pada = 0;   /* 0 = tidak ada tenggat berjalan */
-
-/* true kalau kepulangan ke halaman utama berikutnya harus diikuti layar tidur
- * (layar_set(false)) -- lihat komentar panjang di refresh_cb() (dekat
- * ukur_lalu_lokal) dan di halaman_evaluasi(). */
-static bool     s_tidur_setelah_pulang = false;
 
 /* Layar pembuka. Definisinya jauh di bawah (butuh scr_wajah dan helper widget),
  * tetapi layar_set() adalah satu-satunya pintu menyala/mati layar dan karena itu
@@ -390,14 +296,8 @@ static void splash_batal(void);
  * Tenggatnya dipasang PEMANGGIL, bukan layar_set(), supaya setiap penyalaan
  * menyatakan maksudnya sendiri -- dan supaya layar_set(false) tetap punya satu
  * arti saja. */
-/* Dipangkas dari 20000/10000 -- backlight+panel menyala adalah beban aktif
- * terbesar (lihat komentar LCD_BL_TERANG), jadi memperpendek berapa lama
- * keduanya menyala per nyala langsung memangkas total waktu boros itu.
- * Masih cukup lama untuk membaca empat kartu metrik (TOMBOL) atau melirik
- * isyarat sekilas (AUTO) dengan tenang -- kalau ternyata kurang, naikkan
- * lagi, ini bukan angka yang dijamin lab, cuma perkiraan wajar. */
-#define LAYAR_MATI_TOMBOL_MS  12000UL
-#define LAYAR_AUTO_MATI_MS     6000UL
+#define LAYAR_MATI_TOMBOL_MS  20000UL
+#define LAYAR_AUTO_MATI_MS    10000UL
 static uint32_t layar_mati_pada = 0;   /* 0 = tanpa batas waktu */
 
 static void layar_set(bool nyala) {
@@ -673,19 +573,23 @@ static lv_obj_t *sat_hr, *sat_sp, *sat_gl;                   /* satuan        */
 static lv_obj_t *obj_ling1, *obj_ling2;
 static lv_obj_t *lbl_home_jam, *lbl_home_menit, *lbl_home_tanggal;
 
-/* lbl_home_id = badge nomor unit ("01"..."99") pojok kanan atas -- lihat
- * komentar id_badge_tampilkan() untuk kenapa isinya cuma disetel setelah
- * jam_mulai(), bukan di sini. */
-static lv_obj_t *lbl_home_id;
+/* Indikator nomor unit -- "02" dkk. dari aw_label_get(), pojok kanan atas,
+ * cuma kelihatan 5 detik di boot dingin (dipasang di setup(), lihat
+ * label_unit_sembunyi_pada). Dibuat tersembunyi di sini supaya tidak pernah
+ * nongol pada refresh_cb() sebelum setup() sempat memutuskan mau
+ * menampilkannya atau tidak. */
+static lv_obj_t *lbl_home_unit;
+static uint32_t  label_unit_sembunyi_pada = 0;   /* 0 = tidak sedang tampil */
 
 /* Halaman ID unit -- latar putih PENUH LAYAR dengan nomor hitam di tengah,
  * dipicu klik GANDA tombol PWR (lihat pwr_klik_dobel()). Beda dari
- * lbl_home_id di atas (badge kecil pojok, cuma sekali per nyala): ini
+ * lbl_home_unit di atas (badge kecil pojok, cuma di boot dingin): ini
  * dipanggil kapan pun pengguna mau, sengaja kontras tinggi (putih/hitam,
  * bukan skema warna jam) supaya gampang difoto/dibaca dari jarak saat
  * menomori unit fisik satu per satu. */
 static lv_obj_t *obj_id_overlay;
 static lv_obj_t *lbl_id_overlay;
+static uint32_t  id_overlay_sembunyi_pada = 0;   /* 0 = tidak sedang tampil */
 
 /* ================= Helper pembuat widget ================= */
 
@@ -1129,26 +1033,6 @@ static void build_home(void) {
    * komentar LING1_CX di atas. */
   batt_buat(scr_home, &batt_home, BATT_KANAN_HOME, BATT_Y_HOME);
 
-  /* Badge nomor unit, pojok kanan atas -- simetris dengan ikon baterai di
-   * kiri, di pita atas yang sama (y=2..16, di atas LING1 yang berhenti di
-   * y=28) supaya tidak pernah tertimpa lingkaran gradasi. Dibuat tersembunyi;
-   * id_badge_tampilkan() yang mengisi teks & memunculkannya, sekali, setelah
-   * jam_mulai() selesai memuat label dari NVS.
-   *
-   * Sejajar horizontal ke PUSAT badan baterai (BATT_Y_HOME..+BATT_H), bukan
-   * y tetap yang kebetulan cocok -- dihitung dari tinggi baris label yang
-   * sebenarnya (lv_obj_get_height() sesudah update_layout(), sama seperti
-   * batt_buat() menghitung align_to() petirnya) supaya tetap sejajar kalau
-   * BATT_Y_HOME/BATT_H atau ukuran fontnya berubah nanti. */
-  lbl_home_id = mk_label(scr_home, "", &lv_font_montserrat_12, C_PUTIH, 0, 0);
-  lv_obj_align(lbl_home_id, LV_ALIGN_TOP_RIGHT, -18, 0);
-  lv_obj_update_layout(lbl_home_id);
-  /* +5 px dari pusat baterai -- geser turun sedikit atas permintaan langsung
-   * (persis sejajar terasa terlalu mepet ke tepi atas di layar sungguhan). */
-  lv_obj_set_y(lbl_home_id,
-              BATT_Y_HOME + BATT_H / 2 - lv_obj_get_height(lbl_home_id) / 2 + 5);
-  lv_obj_add_flag(lbl_home_id, LV_OBJ_FLAG_HIDDEN);
-
   /* --- LING1: lingkaran besar, gradasi ungu->oranye HORIZONTAL (bg_grad_*
    * LVGL biasa, bukan bitmap -- lihat komentar C_HOME_BG), menampung jam. */
   obj_ling1 = lv_obj_create(scr_home);
@@ -1202,52 +1086,25 @@ static void build_home(void) {
    * bug yang sama persis, sudah diperbaiki lewat genhomefont.sh. */
   lbl_home_tanggal = mk_label(scr_home, "--", &font_home_kecil, C_PUTIH,
                               HOME_TANGGAL_X, HOME_TANGGAL_Y);
-}
 
-/* ---- Badge nomor unit: muncul sekali per nyala, lalu diam selamanya ----
- * Sama seperti nama BLE "Asawatch-NN", ini memakai label uji manual
- * (aw_label_get(), diatur lewat konsol serial "id N") -- BUKAN opcode
- * protokol baru, murni kenyamanan lab untuk mengenali unit fisik mana yang
- * sedang dipegang saat banyak jam identik dinyalakan berurutan.
- *
- * Ditampilkan setelah jam_mulai(), BUKAN dari build_home() atau
- * splash_tutup(): aw_label_get() membaca s_label milik aw_store, dan itu
- * baru terisi dari NVS di dalam aw_store_begin(), yang dipanggil jam_mulai()
- * -- lihat urutan di setup(). Memanggilnya lebih awal (mis. langsung saat
- * splash_tutup() memuat scr_home) akan selalu membaca 0, karena NVS-nya
- * belum sempat dibaca sama sekali.
- *
- * Praktiknya ini tidak membuat badge "terlambat" -- jam_mulai() cuma makan
- * microdetik, dan tidak ada lv_timer_handler() lagi di antara sini dan
- * gambar pertama scr_home (splash_tunggu() baru saja berhenti menggambar
- * begitu splash_tutup() dipanggil, lihat komentar di sana), jadi badge tetap
- * ikut nongol di frame pertama yang benar-benar sampai ke panel.
- *
- * Dipanggil TEPAT SEKALI dari setup() -- bukan dari halaman_set() atau
- * dari mana pun yang bisa terpanggil ulang saat layar tidur/bangun -- supaya
- * "tidak tampil lagi kecuali dimatikan total lalu dihidupkan lagi" benar
- * dengan sendirinya: setup() cuma berjalan sekali per power-on sungguhan. */
-#define ID_BADGE_MS 5000
-
-static lv_timer_t *id_badge_timer = NULL;
-
-static void id_badge_tutup_cb(lv_timer_t *t) {
-  lv_timer_del(t);
-  id_badge_timer = NULL;
-  lv_obj_add_flag(lbl_home_id, LV_OBJ_FLAG_HIDDEN);
-}
-
-static void id_badge_tampilkan(void) {
-  uint8_t label = aw_label_get();
-  if (!label) return;   /* belum diatur ("id N") -- tidak ada nomor untuk ditampilkan */
-
-  char buf[4];
-  snprintf(buf, sizeof(buf), "%02u", (unsigned)label);
-  lv_label_set_text(lbl_home_id, buf);
-  lv_obj_clear_flag(lbl_home_id, LV_OBJ_FLAG_HIDDEN);
-
-  id_badge_timer = lv_timer_create(id_badge_tutup_cb, ID_BADGE_MS, NULL);
-  lv_timer_set_repeat_count(id_badge_timer, 1);
+  /* Nomor unit, pojok kanan atas -- align dipakai (bukan koordinat tetap
+   * seperti label lain di atas) supaya tetap nempel ke pojok berapa pun
+   * lebar teksnya ("02" vs "99"). Isi & tampilannya diputuskan setup(),
+   * bukan di sini -- lihat label_unit_sembunyi_pada.
+   *
+   * Posisi disamakan dengan varian sentuh (touchscreen.ino): sejajar
+   * horizontal ke PUSAT badan baterai (BATT_Y_HOME..+BATT_H), dihitung dari
+   * tinggi baris label yang sebenarnya (lv_obj_get_height() sesudah
+   * update_layout()) supaya tetap sejajar kalau BATT_Y_HOME/BATT_H atau
+   * ukuran fontnya berubah nanti, lalu digeser +5 px turun dan -22 px dari
+   * tepi kanan (bukan -6) -- hasil dua kali penyesuaian visual eksplisit
+   * (-18 kekanan, -28 kekiri, -22 pas). */
+  lbl_home_unit = mk_label(scr_home, "", &lv_font_montserrat_12, C_PUTIH, 0, 0);
+  lv_obj_align(lbl_home_unit, LV_ALIGN_TOP_RIGHT, -22, 0);
+  lv_obj_update_layout(lbl_home_unit);
+  lv_obj_set_y(lbl_home_unit,
+              BATT_Y_HOME + BATT_H / 2 - lv_obj_get_height(lbl_home_unit) / 2 + 5);
+  lv_obj_add_flag(lbl_home_unit, LV_OBJ_FLAG_HIDDEN);
 }
 
 /* ================= Layar pembuka =================
@@ -1580,13 +1437,12 @@ static void nilai_set(lv_obj_t *lbl, lv_obj_t *satuan, const lv_font_t *fn,
  * ADC. Jaraknya 6%, sedikit di atas riak yang tersisa setelah median + EMA +
  * minimum jendela 3 menit di battery.cpp.
  *
- * Ambangnya juga tidak rata jaraknya. Ujung bawah membedakan "masih bisa
- * dipakai" versus "cari charger sekarang". Ujung atas (kotak ke-3, permintaan
- * langsung) sengaja DINAIKKAN ke 90% -- di bawah itu ikon TIDAK BOLEH terlihat
- * penuh, supaya "baterai penuh" di layar selalu berarti benar-benar hampir
- * penuh, bukan "lumayan penuh" pada 73%. */
-static const int BATT_TURUN[BATT_N_KOTAK] = { 12, 42, 84 };  /* kotak ke-n padam di bawah ini */
-static const int BATT_NAIK [BATT_N_KOTAK] = { 18, 48, 90 };  /* kotak ke-n menyala di atas ini */
+ * Ambangnya juga tidak rata jaraknya. Yang benar-benar perlu dibedakan adalah
+ * ujung bawah -- "masih bisa dipakai" versus "cari charger sekarang" -- bukan
+ * ujung atas, di mana beda 90% dan 100% tidak mengubah apa pun yang dilakukan
+ * pemakai. */
+static const int BATT_TURUN[BATT_N_KOTAK] = { 12, 42, 67 };  /* kotak ke-n padam di bawah ini */
+static const int BATT_NAIK [BATT_N_KOTAK] = { 18, 48, 73 };  /* kotak ke-n menyala di atas ini */
 
 static int batt_hitung_kotak(int persen, int lalu) {
   /* Tampilan pertama belum punya riwayat, jadi histeresis tidak bisa dipakai:
@@ -1678,19 +1534,15 @@ static void batt_buat(lv_obj_t *parent, batt_widget_t *w, int kanan, int y) {
  * seperti pengisian dayanya sendiri -- lalu HILANG SENDIRI setelah beberapa
  * detik supaya tidak menutupi wajah jam selamanya selama jam dicas semalaman.
  *
- * Angka persennya SENGAJA TIDAK ditulis (revisi dari versi pertama yang
- * menulis "73%" di tengah cincin) -- atas permintaan langsung, setelah
- * dijelaskan bahwa persen dari tegangan Li-Po cuma akurat +-5..10% (lihat
- * battery.h) dan saat mengisi malah bias ke atas (fase CV menahan tegangan
- * dekat 4,2V jauh sebelum sel benar-benar penuh, lihat komentar baterai di
- * refresh_cb()). Menulis angka persis di tengah animasi charger akan
- * MENJANJIKAN ketelitian yang tidak dimiliki jam ini, persis alasan kenapa
- * ikon baterai di w->petir juga cuma tiga kotak, bukan angka -- tapi
- * GERAKAN mengisinya sendiri (sebatas seberapa penuh, bukan angkanya) tetap
- * dipertahankan, cuma teksnya diganti "MENGISI DAYA" yang tetap, tidak ikut
- * berubah mengikuti cincin. Percobaan spinner tak tentu (potongan berputar,
- * tanpa kaitan ke persen sama sekali) DIBATALKAN atas permintaan langsung --
- * kembali ke cincin mengisi seperti semula.
+ * Angka persennya SENGAJA TIDAK ditulis -- persen dari tegangan Li-Po cuma
+ * akurat +-5..10% (lihat battery.h) dan saat mengisi malah bias ke atas (fase
+ * CV menahan tegangan dekat 4,2V jauh sebelum sel benar-benar penuh, lihat
+ * komentar baterai di refresh_cb()). Menulis angka persis di tengah animasi
+ * charger akan MENJANJIKAN ketelitian yang tidak dimiliki jam ini, persis
+ * alasan kenapa ikon baterai di w->petir juga cuma tiga kotak, bukan angka --
+ * tapi GERAKAN mengisinya sendiri (sebatas seberapa penuh, bukan angkanya)
+ * tetap dipertahankan, cuma teksnya "MENGISI DAYA" yang tetap, tidak ikut
+ * berubah mengikuti cincin.
  *
  * Ditaruh di lv_layer_top(), bukan sebagai anak scr_wajah/scr_home: layer itu
  * digambar di atas layar aktif yang mana pun tanpa peduli lv_scr_load() yang
@@ -1719,9 +1571,8 @@ static void cas_toast_opa_cb(void *obj, int32_t v) {
   lv_obj_set_style_opa((lv_obj_t *)obj, (lv_opa_t)v, 0);
 }
 
-/* Cuma menggerakkan nilai cincin -- beda dari versi ber-angka sebelumnya,
- * tidak ada lagi label yang ikut ditulis ulang di sini, karena tulisannya
- * ("MENGISI DAYA") sekarang tetap sepanjang waktu. */
+/* Cuma menggerakkan nilai cincin -- tidak ada label yang ikut ditulis ulang
+ * di sini, karena tulisannya ("MENGISI DAYA") tetap sepanjang waktu. */
 static void cas_toast_isi_cb(void *obj, int32_t v) {
   lv_arc_set_value((lv_obj_t *)obj, v);
 }
@@ -1753,8 +1604,8 @@ static void cas_toast_tutup_cb(lv_timer_t *t) {
   lv_anim_start(&a);
 }
 
-/* Bangun toast sekali di setup(), tersembunyi. Sama seperti build_splash(),
- * objeknya dibuat lebih dulu dan cuma disembunyikan/ditampilkan sesudahnya --
+/* Bangun toast sekali di setup(), tersembunyi. Sama seperti splash: objeknya
+ * dibuat lebih dulu dan cuma disembunyikan/ditampilkan sesudahnya --
  * membuat/menghapus objek LVGL berulang kali di konteks loop() jauh lebih
  * mahal daripada menggeser satu flag. */
 static void cas_toast_bangun(void) {
@@ -1863,18 +1714,8 @@ static void cas_toast_tampilkan(void) {
  * masalahnya dengan yang dihindari komentar layar_set(false) soal SLPIN.
  * Ditaruh di lv_layer_top() seperti cas_toast: satu objek di atas layar
  * aktif yang mana pun, dibangun sekali di setup(), geser flag saja saat
- * dipakai. Tenggat sembunyinya lewat lv_timer, sama seperti id_badge di atas
- * dan cas_toast -- bukan gaya deadline-di-refresh_cb() dari varian no_touch,
- * supaya konsisten dengan pola overlay yang sudah ada di berkas ini. */
-#define ID_OVERLAY_MS 3000   /* lama halaman ID tampil sebelum kembali sendiri */
-
-static lv_timer_t *id_overlay_timer = NULL;
-
-static void id_overlay_tutup_cb(lv_timer_t *t) {
-  lv_timer_del(t);
-  id_overlay_timer = NULL;
-  lv_obj_add_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
-}
+ * dipakai. */
+#define ID_OVERLAY_MS 3000UL   /* lama halaman ID tampil sebelum kembali sendiri */
 
 static void id_overlay_bangun(void) {
   obj_id_overlay = mk_box(lv_layer_top(), 0, 0, SCREEN_W, SCREEN_H, C_PUTIH, 0);
@@ -1882,26 +1723,21 @@ static void id_overlay_bangun(void) {
 
   /* font_digits_48 dipilih karena sudah dikompilasi untuk subset ini
    * (digit 0-9 + '-'), bukan lv_font_montserrat_48 yang tidak diaktifkan di
-   * lv_conf.h -- lihat komentar di pembuatan lbl_jam_hh/mm. Warna 0x000000
-   * literal, bukan konstanta C_*: tidak ada C_HITAM di palet ini (C_HOME_BG
-   * dipakai sebagai LATAR, bukan teks, jadi memakainya di sini untuk warna
-   * teks akan membingungkan). */
+   * lv_conf.h (lihat CLAUDE.md, cuma 12/26/30) -- lihat komentar di
+   * pembuatan lbl_jam_hh/mm. Warna 0x000000 literal, bukan konstanta C_*:
+   * tidak ada C_HITAM di palet ini (C_HOME_BG dipakai sebagai LATAR, bukan
+   * teks, jadi memakainya di sini untuk warna teks akan membingungkan). */
   lbl_id_overlay = mk_label(obj_id_overlay, "--", &font_digits_48, 0x000000, 0, 0);
   lv_obj_align(lbl_id_overlay, LV_ALIGN_CENTER, 0, 0);
 
   lv_obj_add_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
 }
 
-/* Tampilkan halaman ID unit dan (mulai ulang) tenggat sembunyi otomatisnya.
+/* Tampilkan halaman ID unit dan pasang tenggat sembunyi otomatisnya.
  * Diselaraskan ulang (bukan cuma set_text) karena lebar teksnya berubah
- * antara satu digit dan dua ("--" vs "08"), dan label ini berukuran
+ * antara satu digit dan dua ("--" vs "02"), dan label ini berukuran
  * LV_SIZE_CONTENT -- align ulang harus menyusul supaya tetap center. */
 static void id_overlay_tampilkan(void) {
-  if (id_overlay_timer) {
-    lv_timer_del(id_overlay_timer);
-    id_overlay_timer = NULL;
-  }
-
   uint8_t label_unit = aw_label_get();
   if (label_unit) lv_label_set_text_fmt(lbl_id_overlay, "%02u", (unsigned)label_unit);
   else            lv_label_set_text(lbl_id_overlay, "--");
@@ -1909,9 +1745,7 @@ static void id_overlay_tampilkan(void) {
 
   lv_obj_clear_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(obj_id_overlay);
-
-  id_overlay_timer = lv_timer_create(id_overlay_tutup_cb, ID_OVERLAY_MS, NULL);
-  lv_timer_set_repeat_count(id_overlay_timer, 1);
+  id_overlay_sembunyi_pada = millis() + ID_OVERLAY_MS;
 }
 
 /* ---- Baris tanggal yang merangkap baris status ----
@@ -2056,10 +1890,10 @@ static void home_refresh(void) {
 }
 
 /* ================= Halaman utama <-> halaman kedua =================
- * Jam ini tidak berlayar sentuh (touch_poll() dipertahankan hanya demi board
- * yang sentuhannya sehat, lihat catatan di kepala berkas), jadi pengguna tidak
- * bisa mengetuk apa pun untuk berpindah halaman. Perpindahannya karena itu
- * murni REAKSI atas keadaan sesi yang memang sudah datang dari aplikasi:
+ * Jam ini tidak berlayar sentuh sama sekali (lihat catatan board di kepala
+ * berkas), jadi pengguna tidak bisa mengetuk apa pun untuk berpindah halaman.
+ * Perpindahannya karena itu murni REAKSI atas keadaan sesi yang memang sudah
+ * datang dari aplikasi:
  * ARM_SESI/ARM_TITIK/UKUR/MULAI_SESI masing-masing mengubah salah satu dari
  * tiga hal yang diperiksa di bawah. TIDAK ADA opcode baru untuk ini, dan tidak
  * boleh ada -- dokumen protokol tidak menyebut halaman sama sekali, navigasi
@@ -2086,30 +1920,13 @@ static void halaman_evaluasi(void) {
                      jam_sedang_mengukur();
 
   if (perlu_wajah) {
-    /* Alasan baru muncul sebelum tenggat lama sempat habis (mis. ARM_SESI
-     * datang lewat BLE selagi hasil cek manual masih terpampang) -- niat
-     * tidur otomatis dari cek manual yang LAMA sudah tidak berlaku lagi,
-     * sesi/BLE yang sekarang berkuasa, bukan tombol fisik. */
-    s_tidur_setelah_pulang = false;
     halaman_set(true);
     return;
   }
   if (!s_di_wajah) return;      /* sudah di home, tidak ada yang perlu ditunda */
 
   if (!s_pulang_home_pada) s_pulang_home_pada = millis() + HALAMAN_PULANG_MS;
-  else if ((int32_t)(millis() - s_pulang_home_pada) >= 0) {
-    halaman_set(false);
-    /* Cek manual tidak pernah meninggalkan jam (tidak ada BLE, tidak ada
-     * aplikasi yang menunggu) -- begitu hasilnya cukup lama terbaca dan jam
-     * kembali ke wajah utama, tidak ada alasan lagi layar tetap menyala.
-     * layar_set(false) di sini, BUKAN layar_nyala_sementara()-yang-dibalik:
-     * inilah persis efek sekali klik PWR saat layar menyala (lihat
-     * pwr_klik()), cuma dipicu otomatis, bukan oleh jari pengguna. */
-    if (s_tidur_setelah_pulang) {
-      layar_set(false);
-      s_tidur_setelah_pulang = false;
-    }
-  }
+  else if ((int32_t)(millis() - s_pulang_home_pada) >= 0) halaman_set(false);
 }
 
 static void refresh_cb(lv_timer_t *tm) {
@@ -2164,18 +1981,9 @@ static void refresh_cb(lv_timer_t *tm) {
    * terpisah -- layar yang sudah menyala membuat layar_set(true) tidak
    * melakukan apa pun. */
   static bool ukur_lalu = false;
-  static bool ukur_lalu_lokal = false;  /* cek manual: dibaca di sini, sebelum s_ukur_lokal ikut dibersihkan */
   bool ukur_kini = jam_sedang_mengukur();
-  if (ukur_kini && !ukur_lalu) {
-    ukur_lalu_lokal = jam_ukur_lokal();
-    if (!ukur_lalu_lokal) layar_nyala_sementara(LAYAR_AUTO_MATI_MS);
-  }
-  /* Cek manual baru selesai (transisi mengukur -> diam): tidak ada BLE, tidak
-   * ada aplikasi yang menunggu -- satu-satunya yang melihat hasilnya adalah
-   * pemakai yang sedang menatap layar SEKARANG. Menandai di sini, dikonsumsi
-   * halaman_evaluasi() begitu HALAMAN_PULANG_MS-nya habis, supaya jam ikut
-   * tidur sendiri persis seperti diklik PWR -- lihat komentar di sana. */
-  if (!ukur_kini && ukur_lalu && ukur_lalu_lokal) s_tidur_setelah_pulang = true;
+  if (ukur_kini && !ukur_lalu && !jam_ukur_lokal())
+    layar_nyala_sementara(LAYAR_AUTO_MATI_MS);
   ukur_lalu = ukur_kini;
 
   /* ---- baterai ----
@@ -2223,6 +2031,19 @@ static void refresh_cb(lv_timer_t *tm) {
   if (layar_mati_pada && (int32_t)(millis() - layar_mati_pada) >= 0) {
     if (jam_sedang_mengukur()) layar_mati_pada = millis() + 5000UL;
     else                       layar_set(false);   /* ini mengosongkan tenggatnya */
+  }
+
+  /* Tenggat sembunyi indikator nomor unit -- lihat pemasangannya di setup(). */
+  if (label_unit_sembunyi_pada && (int32_t)(millis() - label_unit_sembunyi_pada) >= 0) {
+    lv_obj_add_flag(lbl_home_unit, LV_OBJ_FLAG_HIDDEN);
+    label_unit_sembunyi_pada = 0;
+  }
+
+  /* Tenggat sembunyi halaman ID unit -- dipicu klik ganda PWR, lihat
+   * pwr_klik_dobel()/id_overlay_tampilkan(). */
+  if (id_overlay_sembunyi_pada && (int32_t)(millis() - id_overlay_sembunyi_pada) >= 0) {
+    lv_obj_add_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
+    id_overlay_sembunyi_pada = 0;
   }
 
   /* ---- empat metrik + tiga cincin ----
@@ -2275,14 +2096,13 @@ static void refresh_cb(lv_timer_t *tm) {
 
   static const char *SRC[] = { "none", "rtc", "ntp", "ble" };
   Serial.printf("[hb] %02d:%02d:%02d src=%s wifi=%d ble=%d sesi=%d tunda=%d  "
-                "touch irq=%lu err=%lu evt=%lu  heap=%lu\n",
+                "heap=%lu\n",
                 have_time ? t.tm_hour : 0, have_time ? t.tm_min : 0,
                 have_time ? t.tm_sec : 0,
                 SRC[tm_source()], net_connected() ? 1 : 0,
                 jam_siap_notifikasi() ? 2 : (jam_terhubung() ? 1 : 0),
                 (int)jam_status(), (int)jam_tertunda(),
-                (unsigned long)touch_irq_count, (unsigned long)touch_readerr,
-                (unsigned long)touch_events, (unsigned long)ESP.getFreeHeap());
+                (unsigned long)ESP.getFreeHeap());
 
   long dir, dred, dthr; uint32_t dn, dp;
   ppg_diag(&dir, &dred, &dn, &dthr, &dp);
@@ -2436,18 +2256,17 @@ static void pwr_klik(void) {
  *
  * layar_set(true) dipanggil LANGSUNG (bukan layar_nyala_sementara()) supaya
  * tenggat matinya bisa disamakan persis dengan tenggat sembunyi halaman ID
- * (lewat id_overlay_timer, lihat id_overlay_tampilkan()) -- keduanya harus
- * berakhir bersamaan kalau layar memang baru dinyalakan klik ini. Kalau
- * layar SUDAH menyala, tenggatnya yang sedang berjalan itu dibiarkan (sama
- * seperti layar_nyala_sementara()): pengguna yang sedang memakai layar
- * tidak boleh mendadak dipangkas tenggatnya jadi cuma 3 detik gara-gara
- * mengecek nomor unit. */
+ * di bawah -- keduanya harus berakhir bersamaan kalau layar memang baru
+ * dinyalakan klik ini. Kalau layar SUDAH menyala, tenggatnya yang sedang
+ * berjalan itu dibiarkan (sama seperti layar_nyala_sementara()): pengguna
+ * yang sedang memakai layar tidak boleh mendadak dipangkas tenggatnya jadi
+ * cuma 3 detik gara-gara mengecek nomor unit. */
 static void pwr_klik_dobel(void) {
   if (pwr_daya_lepas) return;
   const bool sudah_nyala = s_layar_nyala;
   layar_set(true);
   id_overlay_tampilkan();
-  if (!sudah_nyala) layar_mati_pada = millis() + ID_OVERLAY_MS;
+  if (!sudah_nyala) layar_mati_pada = id_overlay_sembunyi_pada;
 }
 
 static void pwr_poll(void) {
@@ -2682,7 +2501,7 @@ typedef struct {
 static sag_hasil_t sag_log[SAG_LOG_N];
 static int         sag_log_n = 0, sag_log_i = 0;
 
-/* Memblokir ~1,3 detik: LVGL, touch, dan jam_putar() berhenti selama itu.
+/* Memblokir ~1,3 detik: LVGL dan jam_putar() berhenti selama itu.
  * Boleh HANYA karena ini build kalibrasi sementara. Versi pasifnya nanti tidak
  * memblokir sama sekali. */
 static void sag_ukur(bool cetak) {
@@ -2900,40 +2719,18 @@ void setup() {
                    "karena dicatu USB, bukan baterai");
 
   /* Backlight: PWM 5 kHz / 8 bit lewat LEDC. Tetap gelap dulu supaya tidak
-   * ada flash putih, sekaligus menjaga panel tenang selama kalibrasi touch. */
+   * ada flash putih saat gfx->begin() menyalakan panel. */
   ledcAttach(LCD_BL, 5000, 8);
   ledcWrite(LCD_BL, 0);
 
-  /* ================= URUTAN INIT PENTING =================
-   * Touch HARUS diinisialisasi SEBELUM gfx->begin().
-   *
-   * CST816T mengkalibrasi baseline kapasitifnya saat start. Kalau gfx->begin()
-   * berjalan lebih dulu (toggle LCD_RST + burst SPI ke panel yang menempel di
-   * belakang sensor), chip mengunci baseline yang salah dan melaporkan ghost
-   * touch permanen: register beku di finger=1 dengan IRQ membanjir ~80/detik.
-   *
-   * Terukur lewat uji A/B terkontrol pada board ini:
-   *   touch.begin() -> gfx->begin() : fingers=0, irq/s=0     (bersih, 48 detik)
-   *   gfx->begin() -> touch.begin() : fingers=1, irq/s=80    (ghost, konsisten)
-   * ======================================================= */
+  /* Wire dipakai bersama RTC (PCF85063) dan PPG (MAX30105/30102), keduanya
+   * diinisialisasi belakangan lewat rtc_begin()/ppg_begin(). 100 kHz dipilih
+   * konservatif -- board sebelumnya (varian sentuh) menahannya di 100 kHz
+   * karena CST816T, dan board ini belum diuji ulang di 400 kHz, jadi kecepatan
+   * itu dipertahankan apa adanya sampai ada pengukuran yang membuktikan
+   * sebaliknya. */
   Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);   /* 400k tidak stabil untuk CST816T di board ini */
-  pinMode(TOUCH_IRQ, INPUT_PULLUP);
-  bool touch_ada = touch.begin(Wire, CST816_SLAVE_ADDRESS, I2C_SDA, I2C_SCL);
-  if (!touch_ada) {
-    Serial.println("[err] CST816 tidak terdeteksi -- wajah ini memang tidak butuh sentuh");
-  } else {
-    Serial.printf("[ok] touch: %s\n", touch.getModelName());
-  }
-  delay(150);
-  /* touch.begin() TETAP wajib dipanggil lebih dulu (lihat catatan URUTAN INIT
-   * PENTING di atas gfx->begin()) supaya CST816T tidak mengunci baseline salah,
-   * tapi wajah ini memang tidak berlayar sentuh (lihat catatan di
-   * halaman_evaluasi()), jadi begitu chip terdeteksi ia langsung disuruh
-   * sleep() lewat register CST8xx_REG_SLEEP -- turun dari mode scan aktif ke
-   * mode hemat daya mikroamp. IRQ tidak pernah dipasang dan indev LVGL tidak
-   * pernah didaftarkan, jadi chip tidak pernah dibangunkan lagi. */
-  if (touch_ada) touch.sleep();
+  Wire.setClock(100000);
 
   if (!gfx->begin()) Serial.println("[err] gfx->begin() gagal");
   gfx->fillScreen(RGB565_BLACK);
@@ -2958,12 +2755,10 @@ void setup() {
   disp_drv.draw_buf = &draw_buf;
   lv_disp_drv_register(&disp_drv);
 
-  /* Indev penunjuk SENGAJA tidak pernah didaftarkan: touch.sleep() di atas
-   * membuat CST816T tidak pernah lagi mengirim IRQ, dan wajah ini memang tidak
-   * berlayar sentuh (lihat catatan di halaman_evaluasi()) -- mendaftarkan
-   * indev cuma menambah satu pembacaan kosong per tick LVGL tanpa gunanya. */
+  /* Tidak ada indev penunjuk -- board ini tidak punya chip sentuh, jadi LVGL
+   * berjalan tanpa input device sama sekali. */
 
-  /* RTC berbagi bus I2C dengan touch, dan Wire sudah di-begin di atas. */
+  /* RTC berbagi bus I2C dengan PPG, dan Wire sudah di-begin di atas. */
   rtc_begin();
   tm_begin();
   battery_begin();
@@ -3039,10 +2834,6 @@ void setup() {
    * BOOT); lihat aw_jam.cpp. */
   jam_mulai();
 
-  /* Baru di sini aw_label_get() sungguhan berarti sesuatu -- lihat komentar
-   * panjang di id_badge_tampilkan() kenapa tidak lebih awal. */
-  id_badge_tampilkan();
-
   /* Koreksi halaman: splash_tutup() sudah memuat scr_home lebih dulu karena
    * urutan init ini WAJIB splash sebelum jam_mulai() (dokumen 13.4), jadi ia
    * tidak bisa tahu ada ARM_TITIK yang selamat lintas boot (dokumen 5 & 11).
@@ -3052,6 +2843,33 @@ void setup() {
    * pertama loop(), bukan menyusul satu putaran refresh_cb() kemudian. */
   halaman_evaluasi();
 
+  /* Tenggat mati layar untuk boot dingin. s_layar_nyala mulai TRUE secara
+   * statis (baris deklarasinya), jadi kalau kabel dicolok SEBELUM tombol
+   * ditahan 3 detik -- reset ini tidak pernah melihat layar bertransisi
+   * mati->nyala, dan layar_nyala_sementara() (yang cuma memasang tenggat pada
+   * transisi itu) tidak pernah dipanggil di jalur ini. Tanpa baris ini layar
+   * menyala SELAMANYA setelah boot dingin sampai diklik manual -- persis
+   * gejala yang dilaporkan: menyalakan sambil dicas tidak pernah mati sendiri,
+   * padahal menyalakan lewat pwr_hidupkan_lagi() (board yang sempat "mati"
+   * tapi tetap hidup karena USB) sudah dibatasi LAYAR_MATI_TOMBOL_MS di sana.
+   * Dipasang langsung ke layar_mati_pada, bukan lewat layar_nyala_sementara(),
+   * justru karena tidak ada transisi untuk dideteksi.
+   *
+   * Kalau ada nomor unit untuk ditampilkan (di bawah), tenggatnya DIPERSINGKAT
+   * ke 5 detik yang sama dengan tenggat sembunyi badge -- begitu "pengecekan"
+   * (badge nomor unit) selesai, layar langsung standby (layar_set(false) di
+   * refresh_cb(), efeknya identik dengan sekali klik PWR, BUKAN tahan 3 detik
+   * yang mematikan sungguhan), bukan menunggu 20 detik lagi. */
+  uint8_t label_unit = aw_label_get();
+  if (label_unit) {
+    lv_label_set_text_fmt(lbl_home_unit, "%02u", (unsigned)label_unit);
+    lv_obj_clear_flag(lbl_home_unit, LV_OBJ_FLAG_HIDDEN);
+    label_unit_sembunyi_pada = millis() + 5000UL;
+    layar_mati_pada           = label_unit_sembunyi_pada;
+  } else {
+    layar_mati_pada = millis() + LAYAR_MATI_TOMBOL_MS;
+  }
+
   net_begin();
 
   Serial.printf("[ok] setup selesai, free heap = %lu\n", (unsigned long)ESP.getFreeHeap());
@@ -3059,15 +2877,11 @@ void setup() {
 
 void loop() {
   const uint32_t lag_t0 = micros();
-  touch_poll();          /* tetap dibaca demi board yang sentuhannya sehat */
   konsol_poll();         /* penyuntik opcode untuk uji tanpa HP (dokumen 15) */
   pwr_poll();            /* satu digitalRead; tombol mati harus selalu responsif */
   boot_poll();
 
-  /* PPG ditunda selama masih ada IRQ touch yang belum diproses. Keduanya berbagi
-   * bus I2C, dan satu transaksi FIFO MAX30105 (~1 ms di 100 kHz) cukup untuk
-   * menunda pembacaan touch yang datanya hilang hampir seketika setelah IRQ. */
-  if (!touch_irq_flag) ppg_update();
+  ppg_update();
 
   /* Logika protokol berjalan di task yang SAMA dengan lv_timer_handler()
    * (dokumen 13.2). Yang menyeberang task tinggal satu: antrean perintah BLE
