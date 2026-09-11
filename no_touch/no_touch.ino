@@ -581,6 +581,16 @@ static lv_obj_t *lbl_home_jam, *lbl_home_menit, *lbl_home_tanggal;
 static lv_obj_t *lbl_home_unit;
 static uint32_t  label_unit_sembunyi_pada = 0;   /* 0 = tidak sedang tampil */
 
+/* Halaman ID unit -- latar putih PENUH LAYAR dengan nomor hitam di tengah,
+ * dipicu klik GANDA tombol PWR (lihat pwr_klik_dobel()). Beda dari
+ * lbl_home_unit di atas (badge kecil pojok, cuma di boot dingin): ini
+ * dipanggil kapan pun pengguna mau, sengaja kontras tinggi (putih/hitam,
+ * bukan skema warna jam) supaya gampang difoto/dibaca dari jarak saat
+ * menomori unit fisik satu per satu. */
+static lv_obj_t *obj_id_overlay;
+static lv_obj_t *lbl_id_overlay;
+static uint32_t  id_overlay_sembunyi_pada = 0;   /* 0 = tidak sedang tampil */
+
 /* ================= Helper pembuat widget ================= */
 
 /* Kotak polos tanpa style bawaan tema. */
@@ -1697,6 +1707,47 @@ static void cas_toast_tampilkan(void) {
   lv_timer_set_repeat_count(cas_toast_timer, 1);
 }
 
+/* ================= Halaman ID unit (klik ganda PWR) =================
+ * Sengaja bukan lv_obj_create(NULL) + lv_scr_load(): itu berarti scr_wajah/
+ * scr_home tidak digambar sama sekali selama halaman ini tampil, jadi begitu
+ * disembunyikan LVGL harus menggambar ulang seluruh layar dari nol -- sama
+ * masalahnya dengan yang dihindari komentar layar_set(false) soal SLPIN.
+ * Ditaruh di lv_layer_top() seperti cas_toast: satu objek di atas layar
+ * aktif yang mana pun, dibangun sekali di setup(), geser flag saja saat
+ * dipakai. */
+#define ID_OVERLAY_MS 3000UL   /* lama halaman ID tampil sebelum kembali sendiri */
+
+static void id_overlay_bangun(void) {
+  obj_id_overlay = mk_box(lv_layer_top(), 0, 0, SCREEN_W, SCREEN_H, C_PUTIH, 0);
+  lv_obj_clear_flag(obj_id_overlay, LV_OBJ_FLAG_CLICKABLE);
+
+  /* font_digits_48 dipilih karena sudah dikompilasi untuk subset ini
+   * (digit 0-9 + '-'), bukan lv_font_montserrat_48 yang tidak diaktifkan di
+   * lv_conf.h (lihat CLAUDE.md, cuma 12/26/30) -- lihat komentar di
+   * pembuatan lbl_jam_hh/mm. Warna 0x000000 literal, bukan konstanta C_*:
+   * tidak ada C_HITAM di palet ini (C_HOME_BG dipakai sebagai LATAR, bukan
+   * teks, jadi memakainya di sini untuk warna teks akan membingungkan). */
+  lbl_id_overlay = mk_label(obj_id_overlay, "--", &font_digits_48, 0x000000, 0, 0);
+  lv_obj_align(lbl_id_overlay, LV_ALIGN_CENTER, 0, 0);
+
+  lv_obj_add_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Tampilkan halaman ID unit dan pasang tenggat sembunyi otomatisnya.
+ * Diselaraskan ulang (bukan cuma set_text) karena lebar teksnya berubah
+ * antara satu digit dan dua ("--" vs "02"), dan label ini berukuran
+ * LV_SIZE_CONTENT -- align ulang harus menyusul supaya tetap center. */
+static void id_overlay_tampilkan(void) {
+  uint8_t label_unit = aw_label_get();
+  if (label_unit) lv_label_set_text_fmt(lbl_id_overlay, "%02u", (unsigned)label_unit);
+  else            lv_label_set_text(lbl_id_overlay, "--");
+  lv_obj_align(lbl_id_overlay, LV_ALIGN_CENTER, 0, 0);
+
+  lv_obj_clear_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(obj_id_overlay);
+  id_overlay_sembunyi_pada = millis() + ID_OVERLAY_MS;
+}
+
 /* ---- Baris tanggal yang merangkap baris status ----
  * Ini satu-satunya area teks bebas di wajah ini, jadi ia memikul tiga hal
  * sekaligus. Urutan prioritasnya penting dan disengaja:
@@ -1988,6 +2039,13 @@ static void refresh_cb(lv_timer_t *tm) {
     label_unit_sembunyi_pada = 0;
   }
 
+  /* Tenggat sembunyi halaman ID unit -- dipicu klik ganda PWR, lihat
+   * pwr_klik_dobel()/id_overlay_tampilkan(). */
+  if (id_overlay_sembunyi_pada && (int32_t)(millis() - id_overlay_sembunyi_pada) >= 0) {
+    lv_obj_add_flag(obj_id_overlay, LV_OBJ_FLAG_HIDDEN);
+    id_overlay_sembunyi_pada = 0;
+  }
+
   /* ---- empat metrik + tiga cincin ----
    * jam_snapshot() dipakai, BUKAN ppg_get(): sensor hanya menyala selama
    * pengukuran, jadi membaca langsung dari sensor berarti keempat kartu
@@ -2101,12 +2159,22 @@ static void refresh_cb(lv_timer_t *tm) {
 #define PWR_DEBOUNCE_MS   50
 #define PWR_LAMA_MS     3000
 
+/* Jendela klik kedua untuk klik GANDA (halaman ID unit, lihat
+ * pwr_klik_dobel()). Klik pertama karena ini TIDAK langsung dieksekusi saat
+ * dilepas -- ditunda sampai jendela ini lewat tanpa klik kedua menyusul,
+ * supaya klik tunggal dan klik ganda bisa dibedakan sama sekali. 350 ms
+ * dipilih sebagai jeda wajar antar-klik manusia; lebih pendek dari ambang
+ * tekan-lama BOOT (700 ms) supaya tidak pernah tertukar keduanya. */
+#define PWR_DOBEL_MS     350
+
 static bool     pwr_siap = false;      /* tombol sudah pernah dilepas sejak boot */
 static int      pwr_level_lalu  = HIGH;
 static int      pwr_stabil_lvl  = HIGH;
 static uint32_t pwr_stabil_ms   = 0;
 static uint32_t pwr_tekan_ms    = 0;
 static bool     pwr_lama_jalan  = false;
+static bool     pwr_klik_tertunda    = false;  /* klik pertama, menunggu klik kedua/tenggat */
+static uint32_t pwr_klik_tertunda_ms = 0;
 
 /* Gerbang MENYALA, dipanggil dari setup() tepat setelah latch dipasang.
  *
@@ -2182,6 +2250,25 @@ static void pwr_klik(void) {
   else               layar_nyala_sementara(LAYAR_MATI_TOMBOL_MS);
 }
 
+/* Klik GANDA. Sama seperti pwr_klik(): tidak berbuat apa pun kalau jam
+ * "mati" (cuma bertahan karena USB) -- menyalakan tetap wajib lewat gerbang
+ * tiga detik, klik ganda bukan jalan pintas untuk itu.
+ *
+ * layar_set(true) dipanggil LANGSUNG (bukan layar_nyala_sementara()) supaya
+ * tenggat matinya bisa disamakan persis dengan tenggat sembunyi halaman ID
+ * di bawah -- keduanya harus berakhir bersamaan kalau layar memang baru
+ * dinyalakan klik ini. Kalau layar SUDAH menyala, tenggatnya yang sedang
+ * berjalan itu dibiarkan (sama seperti layar_nyala_sementara()): pengguna
+ * yang sedang memakai layar tidak boleh mendadak dipangkas tenggatnya jadi
+ * cuma 3 detik gara-gara mengecek nomor unit. */
+static void pwr_klik_dobel(void) {
+  if (pwr_daya_lepas) return;
+  const bool sudah_nyala = s_layar_nyala;
+  layar_set(true);
+  id_overlay_tampilkan();
+  if (!sudah_nyala) layar_mati_pada = id_overlay_sembunyi_pada;
+}
+
 static void pwr_poll(void) {
   int level = digitalRead(PWR_KEY);      /* LOW = sedang ditekan */
   if (level != pwr_level_lalu) {
@@ -2197,10 +2284,35 @@ static void pwr_poll(void) {
       /* Tombol PWR memang MASIH ditahan saat board menyala -- begitulah cara
        * board ini dinyalakan. Tekanan itu bukan perintah dan tidak dihitung. */
       pwr_siap = true;
-      Serial.println("[pwr] tombol dilepas -- klik = layar, tahan 3 dtk = mati");
+      Serial.println("[pwr] tombol dilepas -- klik = layar, tahan 3 dtk = mati, "
+                     "klik ganda = tampilkan ID unit");
     } else if (!pwr_lama_jalan) {
-      pwr_klik();                        /* dilepas sebelum ambang tekan-lama */
+      /* Dilepas sebelum ambang tekan-lama -- klik TUNGGAL atau langkah
+       * pertama klik GANDA, dan keduanya belum bisa dibedakan di sini.
+       * Kalau ada klik tertunda dari pelepasan sebelumnya dan kita masih di
+       * dalam jendelanya, ini klik kedua: batalkan aksi klik tunggal yang
+       * tertunda itu (tidak pernah dieksekusi) dan jalankan klik ganda
+       * sekarang juga. Kalau tidak, klik ini sendiri yang ditunda -- lihat
+       * blok tenggatnya di bawah, di luar percabangan tepi ini karena harus
+       * tetap dicek walau tidak ada tepi baru di putaran ini. */
+      if (pwr_klik_tertunda &&
+          (uint32_t)(millis() - pwr_klik_tertunda_ms) < PWR_DOBEL_MS) {
+        pwr_klik_tertunda = false;
+        pwr_klik_dobel();
+      } else {
+        pwr_klik_tertunda    = true;
+        pwr_klik_tertunda_ms = millis();
+      }
     }
+  }
+
+  /* Tenggat klik tunggal: jendela klik ganda lewat tanpa klik kedua
+   * menyusul, jadi klik pertama itu sungguhan klik tunggal -- baru sekarang
+   * dieksekusi. */
+  if (pwr_klik_tertunda &&
+      (uint32_t)(millis() - pwr_klik_tertunda_ms) >= PWR_DOBEL_MS) {
+    pwr_klik_tertunda = false;
+    pwr_klik();
   }
 
   if (pwr_siap && pwr_stabil_lvl == LOW && !pwr_lama_jalan &&
@@ -2645,6 +2757,7 @@ void setup() {
   build_wajah();
   build_home();
   cas_toast_bangun();
+  id_overlay_bangun();
   build_splash();
   splash_mulai();
 
