@@ -90,5 +90,44 @@
  * Multimeter tetap acuan terbaik: BATT_DIVIDER = Vukur / raw yang tercetak. */
 #define BATT_DIVIDER    2.97f
 
+/* ---- Persen saat DICAS (battery.cpp) ----
+ *
+ * Selama kabel tertancap, tegangan di pin BUKAN tegangan sel: charger menaikkannya
+ * sebesar arus x hambatan dalam. Terukur di board ini: mencolok kabel menggeser
+ * tegangan +100 mV dalam 1-2 detik, sebelum sel menerima muatan sedikit pun.
+ * Kurva Li-Po membaca +100 mV itu sebagai ~+8% -- itulah "cepat penuh" dan
+ * itulah "ngedrop" 8-15% saat kabel dicabut.
+ *
+ *   BATT_CHG_IR_MV       koreksi yang dikurangkan dari tegangan saat mengisi.
+ *   BATT_CV_MV           tegangan (sisi baterai) yang dianggap sudah fase CV.
+ *                        Tidak wajib tepat: rata-nya tegangan (naik < 6 mV per
+ *                        3 menit di atas 4100 mV) juga dianggap CV.
+ *   BATT_CV_FULL_MIN     menit di fase CV sebelum angka diizinkan 100%. Sebelum
+ *                        itu angka mentok 99% -- fase CV memang butuh puluhan
+ *                        menit untuk mengisi ~10-20% terakhir dan tegangannya
+ *                        rata, jadi tidak ada cara membacanya dari tegangan.
+ *                        TEBAKAN untuk sel 1500 mAh yang dipakai (fase CV sel
+ *                        sebesar itu pada charger ~0,3-0,5C kira-kira 45-90
+ *                        menit), belum diukur: pantau baris "[batt] fase CV"
+ *                        di Serial dan sesuaikan.
+ *   BATT_CHG_MAX_PCT_MIN persen tertinggi yang boleh bertambah per menit saat
+ *                        mengisi. Batas fisik: sel tidak bisa terisi lebih cepat
+ *                        dari arus chargernya, jadi angka yang melompat lebih
+ *                        cepat dari ini pasti artefak tegangan. Untuk sel 1500
+ *                        mAh, 1%/menit setara ~900 mA -- di atas arus charger
+ *                        board semacam ini, jadi ia hanya pagar, bukan penentu.
+ *                        Sel 1500 mAh pada ~500 mA butuh ~3 jam dari kosong;
+ *                        "penuh dalam beberapa puluh menit" pasti artefak. */
+#define BATT_CHG_IR_MV        100
+#define BATT_CV_MV            4170
+#define BATT_CV_FULL_MIN      60
+/* Batas bawah "plateau" yang dianggap fase CV. Plateau di bawah ini (charger
+ * atau port USB yang tertahan di ~4,05-4,10 V) BUKAN sel yang penuh, jadi tidak
+ * boleh menjalankan penghitung CV maupun merayap ke 100%. Sengaja sedikit di
+ * bawah 4200 supaya toleransi BATT_DIVIDER (+-1% = +-42 mV) tidak membuat sel
+ * yang benar-benar penuh terlewat. */
+#define BATT_CV_PLATEAU_MIN_MV 4150
+#define BATT_CHG_MAX_PCT_MIN  1
+
 /* Tampilkan log diagnostik jam/cuaca/baterai di Serial. */
 #define NET_DEBUG 1

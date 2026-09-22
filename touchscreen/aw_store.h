@@ -115,6 +115,15 @@ void    aw_kalibrasi_glukosa_set(int16_t offset_mgdl);
 uint8_t aw_label_get(void);
 void    aw_label_set(uint8_t n);
 
+/* ---- Persen baterai terakhir yang TAMPIL ----
+ * Bukan bagian protokol. Disimpan supaya mati-hidup tidak menghitung ulang persen
+ * dari nol: perhitungan saat dicas (dikoreksi tegangan charger, merayap di fase
+ * CV) dan perhitungan saat boot di baterai (kurva tegangan) dua hal berbeda dan
+ * bisa selisih beberapa persen -- cukup untuk membuat satu bar hilang seketika
+ * tepat saat jam dinyalakan ulang. 0 = belum pernah disimpan. */
+uint8_t aw_baterai_pct_get(void);
+void    aw_baterai_pct_set(uint8_t pct);
+
 /* ---- Ring buffer ----
  * Kedua fungsi penambah mengembalikan seq entri baru (1..255), atau 0 kalau
  * entri ditolak. Keduanya TIDAK mengirim event BUFFER_PENUH sendiri: itu

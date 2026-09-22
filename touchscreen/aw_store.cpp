@@ -23,6 +23,7 @@ uint32_t aw_uptime_s(void) {
 #define K_KALIB_GL    "kalibgl"
 #define K_TITIK       "titik"
 #define K_LABEL       "label"
+#define K_BATT_PCT    "bpct"
 
 /* Blob ring dibubuhi magic + versi. Kalau tata letak aw_entri_t berubah (mis.
  * field baru ditambahkan), blob lama dibuang alih-alih dibaca sebagai sampah:
@@ -86,6 +87,7 @@ static kalib_t      s_kalib;
 static kalib_gl_t   s_kalib_gl;
 static titik_t      s_titik;
 static uint8_t      s_label = 0;
+static uint8_t      s_batt_pct = 0;
 static uint16_t     s_boot_id = 0;
 static bool         s_anchor_boot_ini = false;
 static bool         s_flag_penuh = false;
@@ -189,6 +191,7 @@ void aw_store_begin(void) {
   if (nt != sizeof(s_titik)) memset(&s_titik, 0, sizeof(s_titik));
 
   s_label = s_nvs.getUChar(K_LABEL, 0);
+  s_batt_pct = s_nvs.getUChar(K_BATT_PCT, 0);
 
   /* Disalin ke RAM saat boot justru karena membacanya dari NVS di dalam
    * callback onRead terlarang (dokumen 4 & 13.1). */
@@ -282,6 +285,15 @@ void aw_label_set(uint8_t n) {
   if (s_nvs_ok) s_nvs.putUChar(K_LABEL, n);
   Serial.printf("[store] label disimpan: %u -- perlu boot ulang supaya nama "
                 "BLE ikut berubah\n", (unsigned)n);
+}
+
+/* ---------------- Persen baterai terakhir ---------------- */
+uint8_t aw_baterai_pct_get(void) { return s_batt_pct; }
+
+void aw_baterai_pct_set(uint8_t pct) {
+  if (pct == s_batt_pct) return;                 /* jangan menulis flash tanpa perubahan */
+  s_batt_pct = pct;
+  if (s_nvs_ok) s_nvs.putUChar(K_BATT_PCT, pct);
 }
 
 /* ---------------- Titik yang ter-ARM (v1.3) ---------------- */
