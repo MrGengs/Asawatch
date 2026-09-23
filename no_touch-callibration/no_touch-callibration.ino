@@ -300,6 +300,53 @@ static void splash_batal(void);
 #define LAYAR_AUTO_MATI_MS    10000UL
 static uint32_t layar_mati_pada = 0;   /* 0 = tanpa batas waktu */
 
+/* ---- Jejak peristiwa daya/layar, untuk diagnostik ----
+ *
+ * Ada karena satu gejala yang tidak bisa dibedakan dari luar: layar mendadak
+ * hitam lalu menyala lagi sendiri saat kabel dicolok. Penyebabnya bisa jam
+ * RESTART (catu turun sesaat waktu charger masuk), bisa klik PWR palsu (jalur
+ * PWR_KEY berbagi dengan header dan bisa berkedip), bisa hal lain. Serial tidak
+ * bisa dibaca saat jam di baterai, jadi peristiwanya dicatat di RAM dan dicetak
+ * heartbeat berikutnya -- kalau jam restart, RAM ini kosong tetapi alasan reset
+ * di baris "[jejak] boot" menjawabnya. */
+#define JEJAK_N 48
+static struct { uint32_t ms; const char *tag; char rinci[40]; } s_jejak[JEJAK_N];
+static uint32_t s_jejak_total = 0, s_jejak_dicetak = 0;
+static const char *s_reset_sebab = "?";
+
+static void jejak(const char *tag, const char *rinci = "") {
+  auto &e = s_jejak[s_jejak_total % JEJAK_N];
+  e.ms  = millis();
+  e.tag = tag;
+  strncpy(e.rinci, rinci, sizeof(e.rinci) - 1);
+  e.rinci[sizeof(e.rinci) - 1] = '\0';
+  s_jejak_total++;
+}
+
+static const char *reset_nama(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "POWERON (daya baru masuk)";
+    case ESP_RST_EXT:       return "EXT (pin reset)";
+    case ESP_RST_SW:        return "SW (esp_restart)";
+    case ESP_RST_PANIC:     return "PANIC (crash)";
+    case ESP_RST_INT_WDT:   return "INT_WDT";
+    case ESP_RST_TASK_WDT:  return "TASK_WDT";
+    case ESP_RST_WDT:       return "WDT";
+    case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (catu turun)";
+    case ESP_RST_USB:       return "USB (direset lewat USB/DTR-RTS)";
+    case ESP_RST_JTAG:      return "JTAG";
+    case ESP_RST_PWR_GLITCH:return "PWR_GLITCH (gangguan catu)";
+    case ESP_RST_CPU_LOCKUP:return "CPU_LOCKUP";
+    case ESP_RST_UNKNOWN:   return "TAK DIKETAHUI";
+    default:                return "LAIN";
+  }
+}
+
+/* true kalau boot ini terbukti dicatu USB (lihat setup()): satu-satunya keadaan
+ * di mana toast "MENGISI DAYA" boleh muncul tanpa colokan yang teramati. */
+static bool s_boot_usb = false;
+
 static void layar_set(bool nyala) {
   if (nyala && pwr_daya_lepas) return;
   if (nyala == s_layar_nyala) return;
@@ -339,6 +386,7 @@ static void layar_set(bool nyala) {
     gfx->displayOff();
     s_bl_tunda = false;
   }
+  jejak(nyala ? "layar ON" : "layar OFF");
   Serial.printf("[pwr] layar %s\n", nyala ? "menyala" : "dimatikan");
 }
 
@@ -1996,31 +2044,116 @@ static void refresh_cb(lv_timer_t *tm) {
    * mengenali fase CV di ujung pengisian karena tegangannya sudah rata.
    * Keduanya hanya membuat petirnya TIDAK muncul -- tidak pernah klaim palsu
    * bahwa jam sedang mengisi. */
+  /* Persen dari sesi sebelumnya, sekali, sebelum bacaan pertama. NVS sudah siap
+   * di titik ini (jam_mulai() berjalan di setup(), refresh_cb baru jalan dari
+   * loop()). */
+  {
+    static bool tersimpan_dimuat = false;
+    if (!tersimpan_dimuat) {
+      tersimpan_dimuat = true;
+      battery_set_tersimpan((int)aw_baterai_pct_get());
+    }
+  }
+
   battery_update();
+
+  {
+    static bool awal_dicatat = false;
+    if (!awal_dicatat && battery_valid()) {
+      awal_dicatat = true;
+      char b[40];
+      snprintf(b, sizeof(b), "awal=%d%% tersimpan=%d%%", battery_percent(),
+               (int)aw_baterai_pct_get());
+      jejak("persen awal", b);
+      Serial.printf("[batt] persen %s\n", b);
+    }
+  }
+
+  /* Simpan persen yang tampil: paling cepat tiap 10 menit, atau langsung kalau
+   * bergeser >= 5 (mis. baru dicabut dari charger). Tiap tulis flash NVS, jadi
+   * sengaja jarang; pwr_matikan() menyimpan sekali lagi saat dimatikan. */
+  if (battery_valid()) {
+    static uint32_t simpan_ms = 0;
+    static int simpan_pct = -100;
+    const int pct = battery_percent();
+    if (abs(pct - simpan_pct) >= 5 ||
+        (pct != simpan_pct && (uint32_t)(millis() - simpan_ms) >= 600000UL)) {
+      aw_baterai_pct_set((uint8_t)pct);
+      simpan_pct = pct;
+      simpan_ms  = millis();
+    }
+  }
+
+  /* Tiap probe sag yang selesai dicatat -- nilainya-lah yang memutuskan ikon
+   * charge (lihat SAG_*_F di battery.cpp), jadi inilah data yang dibutuhkan kalau
+   * ikonnya salah. Dicetak langsung ke Serial DAN masuk jejak (yang bisa dibaca
+   * setelah kejadian, saat jam baru dicolok ke PC). */
+  {
+    static uint32_t probe_lalu = 0;
+    const uint32_t seq = battery_probe_seq();
+    if (seq != probe_lalu) {
+      probe_lalu = seq;
+      char b[40];
+      snprintf(b, sizeof(b), "sag=%+.1f pakai=%+.1f -> %s", battery_probe_sag_f(),
+               battery_probe_pakai_f(), battery_charging() ? "mengisi" : "baterai");
+      jejak(battery_probe_berat() ? "probe layar-ON" : "probe layar-OFF", b);
+      Serial.printf("[probe] %s %s\n",
+                    battery_probe_berat() ? "layar-ON " : "layar-OFF", b);
+    }
+  }
+
   if (battery_valid()) {
     static int kotak_lalu = -1;
     static int isi_lalu   = -1;
-    int kotak = batt_hitung_kotak(battery_percent(), kotak_lalu);
-    int chg   = battery_charging() ? 1 : 0;
+    static uint32_t chg_terakhir_ms = 0;   /* kapan status mengisi terakhir true */
+    const int persen = battery_percent();
+    int kotak = batt_hitung_kotak(persen, kotak_lalu);
+    /* Sel yang SUDAH 100% tidak lagi menampilkan mode mengisi -- baik warna
+     * kotak (C_ISI) maupun lambang petir -- walau kabel masih tertancap dan
+     * battery_charging() masih true. Alasannya dua:
+     *   1. Charger tetap menyalurkan arus pemeliharaan kecil selama kabel
+     *      menempel di sel yang penuh; battery_charging() BENAR melaporkan itu,
+     *      tapi bagi pemakai "sudah 100%, ngapain masih dibilang ngecas".
+     *   2. Begitu plateau (fase CV) terdeteksi, persen langsung dari tegangan
+     *      mentah (lihat battery.cpp) -- jadi 100% di sini bukan sekadar
+     *      lonjakan sesaat, aman dijadikan syarat mati permanen.
+     * battery_charging() sendiri TIDAK disentuh: log [probe]/[batt]/[jejak]
+     * dan status BLE tetap melaporkan keadaan sebenarnya, cuma tampilan di
+     * layar yang dibungkam. */
+    int chg = (battery_charging() && persen < 100) ? 1 : 0;
     if (kotak != kotak_lalu || chg != isi_lalu) {
       /* Layar dibangunkan saat MULAI mengisi, sebagai satu-satunya umpan balik
        * bahwa kabelnya benar-benar masuk -- jam ini tidak punya LED charger.
        * isi_lalu == -1 dikecualikan supaya boot dalam keadaan tercolok tidak
        * ikut memicunya; layarnya toh sudah menyala di situ. Toast animasi
        * (cas_toast_tampilkan()) memakai gerbang yang sama persis dan untuk
-       * alasan yang sama: hanya pada colokan yang BARU terjadi. */
-      if (chg && isi_lalu == 0) {
+       * alasan yang sama: hanya pada colokan yang BARU terjadi.
+       *
+       * SATU pengecualian: boot yang TERBUKTI dicatu USB (s_boot_usb -- tombol
+       * PWR tidak ditekan, daya baru masuk). Itu justru colokan yang baru
+       * terjadi dari sudut pandang pemakai ("jam mati lalu dicolok"), dan ia
+       * mengharapkan jam langsung menunjukkan sedang mengisi.
+       *
+       * Toast/wake hanya untuk colokan yang BARU: status mengisi sudah padam
+       * >= 2 menit. Tanpa syarat itu, status yang berkedip (probe di ambang)
+       * membangunkan layar dan memutar animasi berkali-kali -- "tiba-tiba
+       * keluar animasi charge lalu ikonnya hilang lagi". */
+      const bool colok_baru = (chg_terakhir_ms == 0 ||
+                               (uint32_t)(millis() - chg_terakhir_ms) > 120000UL);
+      if (chg && colok_baru && (isi_lalu == 0 || (isi_lalu == -1 && s_boot_usb))) {
         layar_nyala_sementara(LAYAR_AUTO_MATI_MS);
         cas_toast_tampilkan();
       }
       kotak_lalu = kotak;
       isi_lalu   = chg;
+      jejak(chg ? "mengisi ON" : "mengisi OFF", battery_sebab_mengisi());
       /* Kedua salinan disegarkan bersamaan -- lihat komentar batt_widget_t --
        * supaya halaman mana pun yang aktif saat halaman_evaluasi() berikutnya
        * berpindah tidak pernah menampilkan ikon yang basi. */
       batt_gambar(&batt_wajah, kotak, chg != 0);
       batt_gambar(&batt_home, kotak, chg != 0);
     }
+    if (chg) chg_terakhir_ms = millis();
   }
 
   /* Tenggat auto-mati. Pengukuran menundanya alih-alih membatalkannya: pengguna
@@ -2094,6 +2227,18 @@ static void refresh_cb(lv_timer_t *tm) {
     rtc_scan_bus();
   }
 
+  if (Serial && s_jejak_dicetak != s_jejak_total) {
+    Serial.printf("[jejak] boot: alasan reset = %s   uptime=%lus\n",
+                  s_reset_sebab, (unsigned long)(millis() / 1000UL));
+    uint32_t mulai = s_jejak_total > JEJAK_N ? s_jejak_total - JEJAK_N : 0;
+    if (s_jejak_dicetak > mulai) mulai = s_jejak_dicetak;
+    for (uint32_t k = mulai; k < s_jejak_total; k++) {
+      const auto &e = s_jejak[k % JEJAK_N];
+      Serial.printf("[jejak]   +%7.1fs  %s %s\n", e.ms / 1000.0f, e.tag, e.rinci);
+    }
+    s_jejak_dicetak = s_jejak_total;
+  }
+
   static const char *SRC[] = { "none", "rtc", "ntp", "ble" };
   Serial.printf("[hb] %02d:%02d:%02d src=%s wifi=%d ble=%d sesi=%d tunda=%d  "
                 "heap=%lu\n",
@@ -2120,11 +2265,14 @@ static void refresh_cb(lv_timer_t *tm) {
                 dir, dred, dthr, (unsigned long)dn, (unsigned long)dp);
 
   Serial.printf("[batt] counts=%d/4095  raw=%d mV (sebaran %d mV)  "
-                "baterai=%d mV  floor=%d mV%s  %d%%\n",
+                "baterai=%d mV  dasar=%d mV%s  %d%%\n",
                 battery_raw_counts(), battery_raw_millivolts(),
                 battery_spread_mv(), battery_millivolts(),
-                battery_floor_mv(), battery_charging() ? " [mengisi]" : "",
+                battery_floor_mv(),
+                battery_charging() ? " [mengisi]" : "",
                 battery_percent());
+  if (battery_charging())
+    Serial.printf("[batt] fase CV: %d detik\n", battery_cv_detik());
   if (battery_history_count() > 1) {
     char hb[192];
     battery_history(hb, sizeof(hb));
@@ -2217,6 +2365,7 @@ static void pwr_matikan(void) {
   Serial.println("[pwr] tombol PWR ditahan -- mematikan");
   layar_set(false);
   jam_siap_mati();               /* sensor padam, ring buffer dipaksa ke NVS */
+  if (battery_valid()) aw_baterai_pct_set((uint8_t)battery_percent());
   digitalWrite(BAT_EN, LOW);     /* di baterai: board berhenti tepat di sini */
 
   /* Sampai di sini berarti masih ada daya dari USB. Versi sebelumnya menjawab
@@ -2225,6 +2374,7 @@ static void pwr_matikan(void) {
    * hang, dan hanya bisa dipulihkan lewat tombol RST. Sekarang ia cuma diam
    * dengan layar mati, dan klik berikutnya menghidupkannya lagi. */
   pwr_daya_lepas = true;
+  battery_usb_pasti();           /* masih hidup setelah latch dilepas = USB */
   Serial.println("[pwr] latch dilepas. Kalau board masih hidup, ia dicatu USB: "
                  "tahan PWR 3 dtk lagi untuk menyalakan kembali.");
 }
@@ -2241,6 +2391,7 @@ static void pwr_hidupkan_lagi(void) {
  * yang sama seperti mematikan, kalau tidak "off" jadi keadaan yang bisa
  * dibatalkan sentuhan tak sengaja. */
 static void pwr_klik(void) {
+  jejak("PWR klik");
   if (pwr_daya_lepas) return;
   /* Klik saat sudah menyala tetap MEMATIKAN, bukan memperpanjang tenggat.
    * Tombol ini satu-satunya cara mematikan layar dengan sengaja, dan menukarnya
@@ -2262,6 +2413,7 @@ static void pwr_klik(void) {
  * yang sedang memakai layar tidak boleh mendadak dipangkas tenggatnya jadi
  * cuma 3 detik gara-gara mengecek nomor unit. */
 static void pwr_klik_dobel(void) {
+  jejak("PWR klik ganda");
   if (pwr_daya_lepas) return;
   const bool sudah_nyala = s_layar_nyala;
   layar_set(true);
@@ -2277,6 +2429,7 @@ static void pwr_poll(void) {
   } else if ((uint32_t)(millis() - pwr_stabil_ms) >= PWR_DEBOUNCE_MS &&
              level != pwr_stabil_lvl) {
     pwr_stabil_lvl = level;              /* tepi yang sudah bersih */
+    jejak(level == LOW ? "PWR turun" : "PWR naik");
     if (level == LOW) {
       pwr_tekan_ms   = millis();
       pwr_lama_jalan = false;
@@ -2614,6 +2767,26 @@ static void konsol_jalankan(char *baris) {
                   (unsigned long)battery_probe_us());
     lag_maks_us = 0; lag_total_us = 0; lag_n = 0; lag_lambat = 0;
   }
+  else if (!strcmp(baris, "layar")) {
+    /* Menggilir layar lewat layar_set() -- jalur yang SAMA dengan klik PWR,
+     * termasuk battery_beban_akan_berubah() yang memicu probe sag alami. Untuk
+     * menguji deteksi charge di meja tanpa menyentuh tombol: tiap panggilan
+     * menghasilkan satu baris "[probe] ..." di Serial. */
+    if (!pwr_daya_lepas) layar_set(!s_layar_nyala);
+  }
+  else if (!strcmp(baris, "jejak")) {
+    /* Cetak ulang SELURUH jejak yang masih ada di RAM (bukan cuma yang baru),
+     * termasuk probe sag yang terjadi saat jam di baterai dan tidak ada host
+     * yang membaca. Cara membacanya setelah menguji cabut kabel. */
+    Serial.printf("[jejak] alasan reset = %s   uptime=%lus   total=%lu\n", s_reset_sebab,
+                  (unsigned long)(millis() / 1000UL), (unsigned long)s_jejak_total);
+    uint32_t mulai = s_jejak_total > JEJAK_N ? s_jejak_total - JEJAK_N : 0;
+    for (uint32_t k = mulai; k < s_jejak_total; k++) {
+      const auto &e = s_jejak[k % JEJAK_N];
+      Serial.printf("[jejak]   +%7.1fs  %s %s\n", e.ms / 1000.0f, e.tag, e.rinci);
+    }
+    s_jejak_dicetak = s_jejak_total;
+  }
   else if (!strcmp(baris, "sag"))    sag_ukur(true);
   else if (!strcmp(baris, "saglog")) sag_cetak_log();
   else if (!strcmp(baris, "id")) {
@@ -2687,12 +2860,33 @@ void setup() {
   digitalWrite(BAT_EN, HIGH);
   pinMode(PWR_KEY, INPUT_PULLUP);
   pinMode(BOOT_KEY, INPUT_PULLUP);
+  const bool kunci_ditekan_awal = (digitalRead(PWR_KEY) == LOW);
 
   /* Gerbang menyala: tombol harus ditahan sampai 3 detik, kalau tidak jam mati
    * lagi sebelum sempat menampilkan apa pun. Dijalankan tepat setelah latch
    * dipasang, karena latch itulah yang membuat kita punya daya untuk menghitung
    * tiga detiknya sama sekali. */
   bool nyala_disengaja = pwr_gerbang_nyala();
+
+  s_reset_sebab = reset_nama(esp_reset_reason());
+
+  /* Bukti PASTI bahwa boot ini dicatu USB, bukan tebakan tegangan. Di baterai,
+   * board hanya bisa menyala kalau tombol PWR DITEKAN (tombol itulah yang
+   * menyambungkan baterai, lihat komentar BAT_EN). Jadi daya yang datang dengan
+   * tombol terlepas cuma bisa berasal dari kabel -- inilah kasus "jam mati lalu
+   * langsung dicolok". Hanya alasan reset yang berarti daya BARU masuk yang
+   * dihitung: reset lunak, panic, watchdog, dan reset lewat USB/RTS bisa terjadi
+   * saat jam jalan di baterai, jadi tidak membuktikan apa-apa. */
+  {
+    const esp_reset_reason_t r = esp_reset_reason();
+    const bool daya_baru = (r == ESP_RST_POWERON || r == ESP_RST_BROWNOUT ||
+                            r == ESP_RST_PWR_GLITCH);
+    if (!nyala_disengaja || (!kunci_ditekan_awal && daya_baru)) {
+      s_boot_usb = true;
+      battery_usb_pasti();
+    }
+  }
+  jejak(s_boot_usb ? "boot dicatu USB (pasti)" : "boot biasa", s_reset_sebab);
 
   Serial.begin(115200);
 

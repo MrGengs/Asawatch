@@ -59,31 +59,30 @@ static const char *s_sebab = "-";      /* aturan yang terakhir menyalakan s_char
 /* ---- persen: TIGA keadaan, bukan satu kurva ----
  *
  * Kurva Li-Po memetakan tegangan ISTIRAHAT ke kapasitas. Saat kabel tertancap
- * tegangan di pin adalah tegangan charger (sel + arus x hambatan dalam), bukan
- * tegangan sel, jadi memakai kurva yang sama di kedua keadaan pasti salah di
- * salah satunya:
+ * DAN arus masih nyata mengalir, tegangan di pin adalah tegangan charger (sel
+ * + arus x hambatan), bukan tegangan sel, jadi memakai kurva yang sama di
+ * kedua keadaan pasti salah di salah satunya:
  *
  *   - mengisi: angka menyentuh 90%+ dalam beberapa menit ("cepat penuh"), lalu
  *   - dicabut: tegangan jatuh ~100 mV dan angka ikut ambles 8-15% seketika.
  *
  * Karena itu:
  *   BATERAI  persen = kurva(median), digeser 1% per langkah (lihat di bawah).
- *   MENGISI  persen = kurva(median - BATT_CHG_IR_MV), hanya boleh NAIK, tidak
- *            lebih cepat dari BATT_CHG_MAX_PCT_MIN per menit, mentok 99%.
- *            Di fase CV tegangan rata dan tidak memuat informasi apa pun; angka
- *            merayap dari 92% ke 99% menurut waktu, dan 100% baru diizinkan
- *            setelah BATT_CV_FULL_MIN menit.
+ *   MENGISI, belum plateau (fase CC) -- persen = kurva(median - BATT_CHG_IR_MV),
+ *            hanya boleh NAIK, tidak lebih cepat dari BATT_CHG_MAX_PCT_MIN per
+ *            menit, mentok 99%.
+ *   MENGISI, sudah plateau (fase CV, `cv` true di bawah) -- arus sudah kecil,
+ *            IR drop ikut hilang (TERBUKTI dengan multimeter di board ini:
+ *            tegangan di pin dan di terminal sel jadi SAMA persis begitu
+ *            plateau), jadi persen = kurva(median) LANGSUNG tanpa koreksi
+ *            ataupun jeda waktu -- naik seketika kalau tegangan mendukung.
  *   Colok/cabut: persen yang sedang tampil DIBAWA lewat peralihan; jendela
  *            tegangan dikosongkan karena isinya milik keadaan yang lama. */
-#ifndef BATT_CHG_LEBIH_PCT
-#define BATT_CHG_LEBIH_PCT 4          /* batas atas saat dicas: kurva(tegangan) + ini */
-#endif
 #define PCT_TURUN_MS   5000UL         /* baterai: 1% turun per 5 s (<= 12%/mnt) */
 #define PCT_NAIK_MS    15000UL        /* baterai: 1% naik per 15 s              */
-#define PCT_NAIK_MIN   3
-#define PCT_LANJUT_PCT 12             /* boot: lanjut dari nilai tersimpan kalau selisih <= ini */              /* baterai: naik hanya kalau selisih >= ini */
-#define CV_PLATEAU_MV  6              /* naik < ini per 3 mnt di >= 4100 mV = CV */
-#define CV_START_PCT   92             /* kurva(4200 - 100 mV): awal merayap CV   */
+#define PCT_NAIK_MIN   3              /* baterai: naik hanya kalau selisih >= ini */
+#define PCT_LANJUT_PCT 12             /* boot: lanjut dari nilai tersimpan kalau selisih <= ini */
+#define CV_PLATEAU_MV  6              /* naik < ini per 3 mnt di >= BATT_CV_PLATEAU_MIN_MV = CV */
 static int      s_percent_init = 0;
 static int      s_tersimpan    = 0;   /* persen tersimpan di NVS dari sesi sebelumnya (0 = tidak ada) */
 static uint32_t s_pct_ms       = 0;   /* langkah persen terakhir                */
@@ -221,6 +220,20 @@ static bool     s_sag_ada      = false;
 static uint32_t s_probe_us     = 0;
 static uint32_t s_tren_sah_ms  = 0;   /* tren dibisukan sampai 3 mnt setelah ini */
 static uint32_t s_step_naik_ms = 0;   /* langkah-naik terakhir; menggerbang sag besar */
+static uint32_t s_step_turun_ms = 0;  /* langkah-turun terakhir; menggerbang probe dari pantulan konektor */
+
+/* Konektor USB bisa "memantul" -- kontak putus-nyambung dalam hitungan
+ * puluhan/ratusan ms sebelum benar-benar lepas -- dan probe sag cuma membaca
+ * SATU sampel sesaat, jadi rentan tertipu satu sentakan itu jadi "mirip
+ * dicolok". Aturan 3 (langkah tegangan) sudah membuktikan kabel benar-benar
+ * lepas lewat jendela 4 detik yang jauh lebih tahan pantulan; begitu itu
+ * terjadi, probe DIBISUKAN dari MENYALAKAN ulang untuk beberapa detik --
+ * gejalanya kalau tidak: ikon mengisi berkedip sekali (nyala lalu padam lagi)
+ * TEPAT saat kabel dicabut. Pendek saja (bukan 3 menit seperti gerbang
+ * s_step_naik_ms di aturan 2): pantulan konektor selesai dalam hitungan detik,
+ * bukan menit, dan gerbang yang kepanjangan menunda deteksi colok-ulang yang
+ * sungguhan kalau pengguna cabut-pasang cepat. */
+#define COLOK_BOUNCE_GUARD_MS 3000UL
 
 /* Acuan sejak nyala. Tanpa ini tidak ada cara membedakan dua sebab yang sama
  * sekali berbeda ketika persen tidak bergerak:
@@ -234,10 +247,19 @@ static uint32_t s_first_ms = 0;
 
 /* Kurva pelepasan Li-Po 1 sel. Hubungan tegangan-kapasitas jauh dari linear --
  * peta linear 3.3-4.2 V akan salah besar di tengah rentang. Titik-titik ini
- * diinterpolasi linear di antaranya. */
+ * diinterpolasi linear di antaranya.
+ *
+ * Titik teratas 4190 (bukan 4200 nominal datasheet): terukur LANGSUNG dengan
+ * multimeter di board ini, di terminal sel, saat arus cas sudah plateau
+ * (empat kali, konsisten) -- charger sungguhan berhenti menaik di situ, bukan
+ * di 4200 yang cuma asumsi datasheet. Battery_update() memakai titik ini
+ * sebagai "sel sudah penuh" begitu fase CV plateau terdeteksi -- lihat cabang
+ * `cv` di sana -- jadi angka teratas kurva HARUS cocok dengan charger yang
+ * sungguhan dipakai, bukan angka buku. Kalau ganti charger/sel dan angkanya
+ * plateau di tempat lain, ukur ulang dan sesuaikan titik ini. */
 typedef struct { int mv; int pct; } curve_pt_t;
 static const curve_pt_t CURVE[] = {
-  { 4200, 100 }, { 4100, 92 }, { 4000, 85 }, { 3950, 78 },
+  { 4190, 100 }, { 4100, 92 }, { 4000, 85 }, { 3950, 78 },
   { 3900,  70 }, { 3850, 62 }, { 3800, 55 }, { 3750, 47 },
   { 3700,  40 }, { 3650, 33 }, { 3600, 25 }, { 3550, 18 },
   { 3500,  12 }, { 3450,  8 }, { 3400,  5 }, { 3300,  2 },
@@ -496,8 +518,14 @@ void battery_update(void) {
     if (s_pl_n < 3) s_pl_n++;
 
     /* Menyalakan: yakin dalam satu probe, atau dua probe berturut-turut yang
-     * sama-sama mirip sumber teregulasi. */
-    if (sag_pakai <= SAG_COLOK_YAKIN_F || (s_pl_n >= 2 && (s_pl_hist & 3) == 3)) {
+     * sama-sama mirip sumber teregulasi -- KECUALI kabel baru saja terbukti
+     * lepas lewat langkah tegangan (lihat COLOK_BOUNCE_GUARD_MS): itu tandanya
+     * bacaan "mirip dicolok" ini kemungkinan besar pantulan konektor, bukan
+     * kabel yang balik tercolok sungguhan. */
+    const bool baru_cabut = s_step_turun_ms &&
+        (uint32_t)(millis() - s_step_turun_ms) < COLOK_BOUNCE_GUARD_MS;
+    if (!baru_cabut &&
+        (sag_pakai <= SAG_COLOK_YAKIN_F || (s_pl_n >= 2 && (s_pl_hist & 3) == 3))) {
       s_charging = true;
       s_sebab    = "probe-sag";
     } else {
@@ -559,6 +587,7 @@ void battery_update(void) {
       s_sag_ada      = false;
     } else if (lama - baru >= STEP_MV) {
       s_charging     = false;
+      s_step_turun_ms = millis();
       s_tren_sah_ms  = millis();
       s_sag_ada      = false;
     }
@@ -620,9 +649,10 @@ void battery_update(void) {
     s_pct_ms       = now;
   } else if (s_charging) {
     /* Fase CV: tegangan menempel di plafon charger, jadi tidak ada lagi yang
-     * bisa dibaca darinya. Dikenali dari dua hal supaya tidak bergantung pada
-     * ketepatan BATT_DIVIDER: sudah di atas BATT_CV_MV, atau rata (kenaikan
-     * jendela 3 menit di bawah CV_PLATEAU_MV) di wilayah 4100 mV ke atas. */
+     * bisa dibaca darinya lewat KOREKSI (arus sudah kecil, IR drop ikut kecil).
+     * Dikenali dari dua hal supaya tidak bergantung pada ketepatan BATT_DIVIDER:
+     * sudah di atas BATT_CV_MV, atau rata (kenaikan jendela 3 menit di bawah
+     * CV_PLATEAU_MV) di wilayah BATT_CV_PLATEAU_MIN_MV ke atas. */
     int naik = 999;                                /* belum ada jendela penuh */
     if (s_wmin_n >= WMIN_SLOTS)
       naik = s_wmin[(s_wmin_i + WMIN_SLOTS - 1) % WMIN_SLOTS] - s_wmin[s_wmin_i];
@@ -633,36 +663,44 @@ void battery_update(void) {
     }
     const bool cv = basis >= BATT_CV_MV ||
                      (basis >= BATT_CV_PLATEAU_MIN_MV && naik < CV_PLATEAU_MV);
-    if (cv) s_cv_ms += dt;
+    if (cv) s_cv_ms += dt;                          /* diagnostik saja, lihat battery_cv_detik() */
 
-    const uint32_t penuh_ms = (uint32_t)BATT_CV_FULL_MIN * 60000UL;
-    int target = mv_to_percent(basis - s_chg_ir_mv);
-    if (s_cv_ms > 0) {
-      uint32_t t = s_cv_ms < penuh_ms ? s_cv_ms : penuh_ms;
-      int merayap = CV_START_PCT + (int)((uint64_t)(100 - CV_START_PCT) * t / penuh_ms);
-      if (merayap > target) target = merayap;
+    int target;
+    if (cv) {
+      /* TERBUKTI dengan multimeter di board ini (dua kali, konsisten): begitu
+       * plateau, tegangan di pin dan di terminal sel jadi SAMA -- arus sudah
+       * terlalu kecil untuk menjatuhkan tegangan lewat kabel/hambatan dalam.
+       * Jadi di sini tegangan mentah SUDAH BOLEH dipercaya apa adanya, tanpa
+       * s_chg_ir_mv (yang dipelajari dari lonjakan AWAL colok, saat arus masih
+       * besar -- sudah tidak berlaku lagi di titik ini) dan tanpa menunggu.
+       *
+       * Versi sebelumnya menebak lewat penghitung waktu (CV_START_PCT merayap
+       * ke 99% selama BATT_CV_FULL_MIN menit) karena belum ada cara memastikan
+       * tegangan mentah bisa dipercaya. Sekarang sudah ada -- dibuang. */
+      target = mv_to_percent(basis);
+    } else {
+      /* Masih fase aktif (CC, atau baru masuk CV dan belum plateau): arus
+       * nyata mengalir, tegangan masih membawa IR drop, jadi tetap dikoreksi.
+       * Mentok 99% -- kalau tegangan mentahnya sendiri sudah menunjuk 100%,
+       * cabang `cv` di atas semestinya sudah menyalakan lebih dulu. */
+      target = mv_to_percent(basis - s_chg_ir_mv);
+      if (target > 99) target = 99;
     }
-    if (s_cv_ms < penuh_ms && target > 99) target = 99;
 
-    /* Batas atas fisik: angka saat dicas tidak boleh melebihi apa yang dikatakan
-     * tegangan sendiri (kurva TANPA koreksi charger) lebih dari BATT_CHG_LEBIH_PCT.
-     * Merayap menurut waktu hanya menebak -- kalau tegangannya sendiri tidak
-     * mendukung (plateau di 4,10 V, bukan 4,2 V), angka "penuh" itu mengarang,
-     * dan begitu jam dimatikan-dinyalakan angkanya dihitung ulang dari tegangan
-     * lalu satu bar hilang. */
-    const int atas = mv_to_percent(basis) + BATT_CHG_LEBIH_PCT;
-    if (target > atas) target = atas;
-    geser_persen(target, 60000UL / BATT_CHG_MAX_PCT_MIN, false);   /* hanya naik */
-
-    /* Pengaman status "mengisi" yang tersangkut. Mencabut kabel saat sel sudah
-     * penuh nyaris tidak menggeser tegangan (arus CV sudah kecil), jadi tidak ada
-     * langkah untuk dilihat dan pembeda satu-satunya, probe sag, bisa tidak
-     * memutuskan. Kalau angka di sini hanya boleh naik, ia membeku di 100% selama
-     * sel terkuras. Yang tidak bisa dipalsukan: di charger yang sungguhan,
-     * tegangan tidak mungkin di bawah kurva berbeban -- kalau kurva TANPA koreksi
-     * sudah lebih rendah dari angka yang tampil, itu sel yang terkuras. */
-    const int nyata = mv_to_percent(basis);
-    if (nyata < s_percent - PCT_NAIK_MIN) geser_persen(nyata, PCT_TURUN_MS, true);
+    /* Naik: LANGSUNG kalau cv (tegangan sendiri sudah bukti kuat, tidak perlu
+     * dipelankan lagi -- itulah yang membuat 100% muncul seketika begitu
+     * tegangan sampai, bukan menunggu waktu tambahan) -- selain itu (fase CC)
+     * tetap dipelankan BATT_CHG_MAX_PCT_MIN per menit seperti sebelumnya,
+     * karena koreksinya cuma tebakan dan belum tentu tepat.
+     * Turun: selalu pelan (PCT_TURUN_MS) -- baik cv atau tidak, penurunan di
+     * sini cuma bisa berarti derau atau charger yang diam-diam berhenti,
+     * bukan sesuatu yang harus langsung dipercaya. */
+    if (target >= s_percent) {
+      if (cv) s_percent = target;
+      else    geser_persen(target, 60000UL / BATT_CHG_MAX_PCT_MIN, false);
+    } else {
+      geser_persen(target, PCT_TURUN_MS, true);
+    }
   } else {
     /* Turun 1% langsung tampil (itu yang dicari pemakai); naik hanya kalau
      * selisihnya nyata -- pemulihan setelah beban dilepas, bukan derau. Baterai

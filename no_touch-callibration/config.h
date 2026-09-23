@@ -75,20 +75,67 @@
  */
 #define BATT_ADC_PIN    0
 
-/* Dikalibrasi memakai charger sebagai referensi tegangan.
+/* Dikalibrasi memakai charger sebagai referensi tegangan -- TEBAKAN, belum
+ * pernah dicek dengan multimeter sungguhan di board TANPA-SENTUH ini.
  *
  * Nominal pembagi 200k/100k = 3.00, tapi itu mengabaikan toleransi resistor dan
- * offset ADC. Charger Li-Po CC/CV meregulasi ke 4.200 V (+-1%) di akhir
- * pengisian, jadi itu referensi fisik yang bisa dipakai: dengan pin membaca
- * 1414 mV saat pengisian selesai, rasio sebenarnya = 4200 / 1414 = 2.97.
+ * offset ADC. Angka 2.97 di bawah menebak charger sudah rata di 4.200 V persis
+ * saat pengisian dianggap selesai (raw 1414 mV -> 4200/1414 = 2.97) -- asumsi
+ * dari datasheet Li-Po, BUKAN pengukuran.
  *
- * Kenapa 1% ini penting: rasio 3.00 memberi 4242 mV, 42 mV di atas 4.200 V.
- * Karena kurva memetakan apa pun >= 4200 mV menjadi 100%, kelebihan itu menelan
- * sekitar 4% penurunan pertama -- baterai mulai terkuras tapi angkanya diam di
- * 100%. Itulah sebabnya "selalu 100%" terlihat seperti sensor macet.
+ * Board touchscreen/ (papan LAIN, jangan disamakan) pernah memakai tebakan yang
+ * sama persis, dan setelah diukur sungguhan dengan multimeter LANGSUNG DI PIN
+ * BATT (titik yang sama dengan pembagi ADC -- bukan di terminal sel kalau
+ * sedang dicas, karena keduanya beda selama arus masih mengalir) ternyata
+ * rasio sebenarnya 3,031, bukan 2,97 -- meleset ~2%. Board ini kemungkinan
+ * meleset juga, tapi BESAR dan ARAHNYA belum tentu sama (resistor pembagi
+ * beda unit, toleransi ADC beda chip).
  *
- * Multimeter tetap acuan terbaik: BATT_DIVIDER = Vukur / raw yang tercetak. */
+ * Cara kalibrasi ulang (sama seperti yang dipakai di touchscreen/): sambungkan
+ * ke charger, baca angka "raw" di baris [batt] pada Serial, ukur tegangan DI
+ * PIN BATT board dengan multimeter di saat yang sama, lalu
+ * BATT_DIVIDER = Vukur / (raw dalam volt). Ulangi 2-3 kali di level baterai
+ * berbeda untuk memastikan hasilnya konsisten sebelum dipakai. */
 #define BATT_DIVIDER    2.97f
+
+/* ---- Persen saat DICAS (battery.cpp) ----
+ *
+ * Selama kabel tertancap DAN arus masih mengalir, tegangan di pin BUKAN
+ * tegangan sel: charger menaikkannya sebesar arus x hambatan (sel + kabel +
+ * konektor). Di touchscreen/ (papan lain) terukur +100 mV dalam 1-2 detik saat
+ * dicolok -- BELUM diukur di board ini, tapi mekanismenya sama (sel Li-Po 1
+ * cell, charger CC/CV yang serupa), jadi dipakai angka yang sama sebagai titik
+ * awal.
+ *
+ * BATT_CV_MV dan `cv` di battery.cpp (bukan lagi penghitung waktu BATT_CV_FULL_MIN
+ * yang sudah dibuang) memakai asumsi yang SAMA dengan touchscreen/: begitu
+ * plateau, tegangan pin dan sel jadi sama persis, jadi tegangan mentah boleh
+ * dipercaya tanpa koreksi maupun jeda waktu. Verifikasi asumsi ini di board ini
+ * sebelum benar-benar mempercayainya (ukur pin BATT vs terminal sel saat
+ * `[batt] fase CV` sudah berjalan beberapa menit) -- lihat komentar CURVE di
+ * battery.cpp untuk detail.
+ *
+ *   BATT_CHG_IR_MV       koreksi yang dikurangkan dari tegangan HANYA selagi
+ *                        arus masih nyata mengalir (belum plateau).
+ *   BATT_CV_MV           tegangan (sisi baterai) yang dianggap sudah fase CV
+ *                        -- begitu tercapai, persen dibaca LANGSUNG dari
+ *                        tegangan, naik seketika kalau tegangan mendukung,
+ *                        turun pelan kalau ternyata cuma derau.
+ *   BATT_CHG_MAX_PCT_MIN persen tertinggi yang boleh bertambah per menit
+ *                        SEBELUM plateau (fase CC). Batas fisik: sel tidak
+ *                        bisa terisi lebih cepat dari arus chargernya --
+ *                        sesuaikan dengan kapasitas sel & arus charger board
+ *                        ini kalau beda dari asumsi 1500 mAh / ~500 mA di
+ *                        touchscreen/. */
+#define BATT_CHG_IR_MV        100
+#define BATT_CV_MV            4170
+/* Batas bawah "plateau" yang dianggap fase CV. Plateau di bawah ini (charger
+ * atau port USB yang tertahan di ~4,05-4,10 V) BUKAN sel yang penuh, jadi tidak
+ * boleh dipercaya sebagai tegangan final. Sengaja sedikit di bawah BATT_CV_MV
+ * supaya toleransi BATT_DIVIDER (+-1% dari nilai terukur) tidak membuat sel
+ * yang benar-benar penuh terlewat. */
+#define BATT_CV_PLATEAU_MIN_MV 4150
+#define BATT_CHG_MAX_PCT_MIN  1
 
 /* Tampilkan log diagnostik jam/cuaca/baterai di Serial. */
 #define NET_DEBUG 1

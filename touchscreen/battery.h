@@ -25,9 +25,12 @@ void battery_update(void);
 
 /* Kapasitas terkira, 0..100.
  *
- * Bukan sekadar kurva tegangan: saat dicas tegangan di pin adalah tegangan
- * charger (+~100 mV), bukan tegangan sel, jadi angkanya dikoreksi, hanya boleh
- * naik, dibatasi lajunya, dan mentok 99% sampai fase CV cukup lama. Saat di
+ * Bukan sekadar kurva tegangan: saat dicas dan arus masih nyata mengalir
+ * (fase CC), tegangan di pin adalah tegangan charger (+~100 mV), bukan
+ * tegangan sel, jadi angkanya dikoreksi, hanya boleh naik, dan mentok 99%.
+ * Begitu arus mengecil sampai plateau (fase CV, TERBUKTI dengan multimeter di
+ * board ini bahwa tegangan pin dan sel jadi sama persis di titik itu), angka
+ * langsung memakai tegangan mentah tanpa koreksi maupun jeda waktu. Saat di
  * baterai angkanya bergeser 1% per langkah menuju kurva(median) dan tidak
  * melompat waktu kabel dicabut. Rinciannya di battery.cpp dan config.h. */
 int battery_percent(void);
@@ -90,7 +93,9 @@ void battery_history(char *buf, int n);
 int  battery_history_count(void);
 
 /* Detik yang sudah dihabiskan di fase CV pada sesi pengisian ini (0 di luar
- * pengisian). Diagnostik: dipakai untuk menyetel BATT_CV_FULL_MIN. */
+ * pengisian). Diagnostik murni -- persen tidak lagi menunggu angka ini
+ * (lihat komentar "persen: TIGA keadaan" di battery.cpp), cuma berguna untuk
+ * melihat berapa lama sel sudah plateau. */
 int battery_cv_detik(void);
 
 /* Beritahu modul ini bahwa kabel USB PASTI tertancap, dari bukti di luar tegangan:

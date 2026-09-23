@@ -11,7 +11,7 @@
  *     dihaluskan lagi dengan EMA.
  *
  * Semua fungsi dipanggil dari konteks loop(). ADC tidak memakai bus I2C, jadi
- * tidak mengganggu RTC maupun PPG.
+ * tidak mengganggu touch maupun RTC.
  */
 #pragma once
 
@@ -23,18 +23,27 @@ void battery_begin(void);
  * pernah memblokir lama dan aman dipanggil dari timer LVGL. */
 void battery_update(void);
 
-/* Kapasitas terkira, 0..100. */
+/* Kapasitas terkira, 0..100.
+ *
+ * Bukan sekadar kurva tegangan: saat dicas dan arus masih nyata mengalir
+ * (fase CC), tegangan di pin adalah tegangan charger (+~100 mV), bukan
+ * tegangan sel, jadi angkanya dikoreksi, hanya boleh naik, dan mentok 99%.
+ * Begitu arus mengecil sampai plateau (fase CV, TERBUKTI dengan multimeter di
+ * board ini bahwa tegangan pin dan sel jadi sama persis di titik itu), angka
+ * langsung memakai tegangan mentah tanpa koreksi maupun jeda waktu. Saat di
+ * baterai angkanya bergeser 1% per langkah menuju kurva(median) dan tidak
+ * melompat waktu kabel dicabut. Rinciannya di battery.cpp dan config.h. */
 int battery_percent(void);
 
 /* Tegangan hasil penghalusan, dalam milivolt. */
 int battery_millivolts(void);
 
-/* Tegangan terendah selama 3 menit terakhir -- inilah dasar persen, bukan nilai
- * sesaat. Sebabnya: perubahan beban (radio Wi-Fi menyala/mati) menggeser
- * tegangan ~53 mV di board ini, cukup memindahkan angka 4% sehingga persen
- * naik-turun mengikuti radio, bukan mengikuti daya. Karena siklus Wi-Fi ~60 s,
- * setiap jendela 3 menit hampir pasti memuat satu sag, jadi nilainya stabil dan
- * selalu berarti hal yang sama: tegangan saat berbeban. */
+/* Tegangan dasar persen: MEDIAN dari nilai terendah tiap slot 5 detik selama 3
+ * menit terakhir (bukan minimum, bukan nilai sesaat). Perubahan beban yang
+ * menempati kurang dari separuh jendela -- satu pengukuran PPG, satu upaya
+ * sambung Wi-Fi -- tidak menggesernya, sedangkan beban menetap tetap
+ * tercermin. Dikosongkan tiap kabel dicolok/dicabut. Nama "floor" peninggalan
+ * versi minimum; dipertahankan supaya pemanggil lama tidak berubah. */
 int battery_floor_mv(void);
 
 /* true kalau jam sedang tersambung ke charger.
@@ -82,6 +91,37 @@ int battery_raw_counts(void);
  * kondisi yang tidak bisa diamati lewat serial karena USB harus dicabut. */
 void battery_history(char *buf, int n);
 int  battery_history_count(void);
+
+/* Detik yang sudah dihabiskan di fase CV pada sesi pengisian ini (0 di luar
+ * pengisian). Diagnostik murni -- persen tidak lagi menunggu angka ini
+ * (lihat komentar "persen: TIGA keadaan" di battery.cpp), cuma berguna untuk
+ * melihat berapa lama sel sudah plateau. */
+int battery_cv_detik(void);
+
+/* Beritahu modul ini bahwa kabel USB PASTI tertancap, dari bukti di luar tegangan:
+ * boot tanpa tombol PWR ditekan (satu-satunya sumber daya lain adalah tombol itu
+ * sendiri), atau board masih hidup setelah latch baterai dilepas. Berbeda dari
+ * deteksi lewat tegangan, ini berlaku seketika -- tidak perlu lonjakan tegangan
+ * (yang tidak ada saat boot di USB) maupun langkah beban (yang butuh layar
+ * berganti keadaan). Aman dipanggil sebelum battery_begin(). */
+void battery_usb_pasti(void);
+
+/* Probe sag terakhir untuk log/diagnostik: nomor urut (naik tiap probe selesai),
+ * sag desimal dalam mV, dan apakah itu langkah NAIK beban (layar menyala). */
+uint32_t battery_probe_seq(void);
+float    battery_probe_sag_f(void);
+float    battery_probe_pakai_f(void);     /* nilai terkompensasi yang dipakai keputusan */
+bool     battery_probe_berat(void);
+
+/* Persen yang tersimpan dari sesi sebelumnya (0 = tidak ada). Panggil SEBELUM
+ * battery_update() pertama. Dipakai sebagai titik awal kalau masih dekat dengan
+ * hitungan tegangan saat boot, supaya mati-hidup tidak menjatuhkan angka
+ * seketika. */
+void battery_set_tersimpan(int pct);
+
+/* Aturan yang terakhir menyalakan status "mengisi": "langkah", "cepat",
+ * "usb-pasti", "probe-sag" atau "tren" ("-" kalau belum pernah). Diagnostik saja. */
+const char *battery_sebab_mengisi(void);
 
 /* true kalau sudah ada pengukuran yang bisa dipakai. */
 bool battery_valid(void);

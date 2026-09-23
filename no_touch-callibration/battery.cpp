@@ -16,27 +16,34 @@ static bool s_valid    = false;
 static int  s_spread   = 0;    /* max-min jendela sampel terakhir */
 static int  s_counts   = 0;    /* hitungan ADC mentah 0..4095 -- deteksi saturasi */
 
-/* ---- dasar perhitungan persen: minimum jendela bergerak ----
+/* ---- dasar perhitungan persen: MEDIAN minimum-slot 3 menit ----
  *
- * Median di atas hanya mampu menolak pencilan yang LEBIH PENDEK dari jendelanya
- * (~2.5 detik). Sag akibat radio Wi-Fi bukan pencilan pendek: ia bertahan
- * selama seluruh upaya sambung, jadi seluruh jendela berada di dalam satu
- * keadaan beban dan medianya ikut pindah.
+ * Median sampel di atas hanya mampu menolak pencilan yang LEBIH PENDEK dari
+ * jendelanya (~2.5 detik). Sag akibat radio Wi-Fi bukan pencilan pendek: ia
+ * bertahan selama seluruh upaya sambung, jadi seluruh jendela berada di dalam
+ * satu keadaan beban dan medianya ikut pindah.
  *
  * Terukur di board ini: radio aktif -> 1365 counts, radio mati -> 1382 counts.
  * Selisih 17 counts = 18 mV di pin = 53 mV di baterai = sekitar 4% pada kurva
- * di dekat penuh. Kalau persen mengikuti nilai sesaat, angkanya naik-turun 4%
- * mengikuti radio -- bukan mengikuti daya.
+ * di dekat penuh.
  *
- * Versi sebelumnya memakai floor ABADI (terendah yang pernah teramati). Itu
- * cacat: floor terpasang di 4143 mV saat sel hampir penuh, sementara pemulihan
- * butuh kenaikan +100 mV = 4243 mV -- di atas batas fisik Li-Po 4200 mV. Jadi
- * angkanya terpaku permanen dan tidak akan pernah bisa naik lagi.
+ * Tegangan dikumpulkan per slot 5 detik (nilai TERENDAH slot itu), 36 slot = 3
+ * menit, lalu dasar persennya adalah MEDIAN slot-slot itu.
  *
- * Sekarang dasarnya minimum selama 3 menit terakhir. Karena siklus retry Wi-Fi
- * ~60 detik, setiap jendela hampir pasti memuat satu sag, sehingga angkanya
- * stabil DAN konsisten (selalu "tegangan saat berbeban"). Bedanya dari floor
- * abadi: jendela ini ikut bergerak NAIK saat baterai benar-benar diisi.
+ * Versi sebelumnya memakai MINIMUM seluruh slot. Itu bagus melawan sag radio
+ * tetapi menjadikan persen tawanan satu peristiwa: satu pengukuran PPG (LED
+ * menarik arus puluhan mA selama belasan detik) atau satu burst BLE menyeret
+ * minimum 3 menit ke bawah, angkanya turun 1-3%, dan naik lagi hanya kalau
+ * selisih >= 2% -- jadi angka hanya bisa turun dan tidak pernah pulih. Itulah
+ * "kadang ngedrop". Median tidak punya cacat itu: peristiwa yang menempati
+ * kurang dari separuh jendela (6 slot dari 36 untuk satu pengukuran PPG, 8 dari
+ * 60 detik siklus retry Wi-Fi) tidak menggeser hasilnya sama sekali, sedangkan
+ * beban yang menetap tetap tercermin karena mengisi lebih dari separuh slot.
+ *
+ * Versi sebelum itu memakai floor ABADI (terendah yang pernah teramati) dan
+ * cacat lain: floor terpasang di 4143 mV saat sel hampir penuh, sementara
+ * pemulihan butuh +100 mV = 4243 mV -- di atas batas fisik Li-Po 4200 mV.
+ * Jendela bergerak tidak pernah terpaku, ia ikut NAIK saat baterai diisi.
  */
 #define WMIN_SLOTS      36            /* 36 x 5 s = 3 menit */
 #define WMIN_SLOT_MS    5000UL
@@ -44,8 +51,46 @@ static uint16_t s_wmin[WMIN_SLOTS];
 static int      s_wmin_n = 0, s_wmin_i = 0;
 static int      s_slot_min = 0;       /* minimum slot 5 s yang sedang berjalan */
 static uint32_t s_slot_ms  = 0;
-static int      s_base_mv  = 0;       /* minimum jendela -> dasar persen */
+static int      s_base_mv  = 0;       /* median jendela -> dasar persen */
 static bool     s_charging = false;
+static bool     s_usb_bukti = false;   /* ada bukti pasti kabel tertancap (lihat battery_usb_pasti) */
+static const char *s_sebab = "-";      /* aturan yang terakhir menyalakan s_charging */
+
+/* ---- persen: TIGA keadaan, bukan satu kurva ----
+ *
+ * Kurva Li-Po memetakan tegangan ISTIRAHAT ke kapasitas. Saat kabel tertancap
+ * DAN arus masih nyata mengalir, tegangan di pin adalah tegangan charger (sel
+ * + arus x hambatan), bukan tegangan sel, jadi memakai kurva yang sama di
+ * kedua keadaan pasti salah di salah satunya:
+ *
+ *   - mengisi: angka menyentuh 90%+ dalam beberapa menit ("cepat penuh"), lalu
+ *   - dicabut: tegangan jatuh ~100 mV dan angka ikut ambles 8-15% seketika.
+ *
+ * Karena itu:
+ *   BATERAI  persen = kurva(median), digeser 1% per langkah (lihat di bawah).
+ *   MENGISI, belum plateau (fase CC) -- persen = kurva(median - BATT_CHG_IR_MV),
+ *            hanya boleh NAIK, tidak lebih cepat dari BATT_CHG_MAX_PCT_MIN per
+ *            menit, mentok 99%.
+ *   MENGISI, sudah plateau (fase CV, `cv` true di bawah) -- arus sudah kecil,
+ *            IR drop ikut hilang (TERBUKTI dengan multimeter di board ini:
+ *            tegangan di pin dan di terminal sel jadi SAMA persis begitu
+ *            plateau), jadi persen = kurva(median) LANGSUNG tanpa koreksi
+ *            ataupun jeda waktu -- naik seketika kalau tegangan mendukung.
+ *   Colok/cabut: persen yang sedang tampil DIBAWA lewat peralihan; jendela
+ *            tegangan dikosongkan karena isinya milik keadaan yang lama. */
+#define PCT_TURUN_MS   5000UL         /* baterai: 1% turun per 5 s (<= 12%/mnt) */
+#define PCT_NAIK_MS    15000UL        /* baterai: 1% naik per 15 s              */
+#define PCT_NAIK_MIN   3              /* baterai: naik hanya kalau selisih >= ini */
+#define PCT_LANJUT_PCT 12             /* boot: lanjut dari nilai tersimpan kalau selisih <= ini */
+#define CV_PLATEAU_MV  6              /* naik < ini per 3 mnt di >= BATT_CV_PLATEAU_MIN_MV = CV */
+static int      s_percent_init = 0;
+static int      s_tersimpan    = 0;   /* persen tersimpan di NVS dari sesi sebelumnya (0 = tidak ada) */
+static uint32_t s_pct_ms       = 0;   /* langkah persen terakhir                */
+static uint32_t s_cv_ms        = 0;   /* akumulasi waktu di fase CV             */
+static uint32_t s_upd_ms       = 0;   /* pemanggilan battery_update sebelumnya  */
+static int      s_chg_ir_mv    = BATT_CHG_IR_MV;  /* koreksi tegangan saat mengisi   */
+static int      s_ir_pre_mv    = 0;   /* tegangan tepat sebelum langkah colok    */
+static uint32_t s_ir_ms        = 0;   /* kapan langkah colok terdeteksi (0=tidak) */
 
 /* ---- deteksi "sedang dicolok": tiga aturan yang saling menambal ----
  *
@@ -62,14 +107,110 @@ static bool     s_charging = false;
  * sehari-hari sebenarnya deteksi langkah 100 mV, bukan sag ini. */
 #define STEP_SLOTS       8      /* 8 x ~500 ms = 4 detik  */
 #define STEP_MV          50     /* langkah colok/cabut terukur >100 mV */
-#define SAG_COLOK_MAX    3      /* <= ini: sumber teregulasi -> dicolok */
-#define SAG_BATERAI_MIN  5      /* >= ini: sel ambles      -> di baterai */
+/* Ambang sag (mV, di sisi baterai, DESIMAL -- lihat probe_rata_f()).
+ *
+ * SEMUA angka di bawah (SAG_COLOK_YAKIN_F, SAG_COLOK_F, SAG_BATERAI_F,
+ * SAG_BUKAN_COLOK_F, SAG_BIAS_ON_F/OFF_F) DIPINDAHKAN dari touchscreen/battery.cpp
+ * (board LAIN, backlight duty 153) sebagai TITIK AWAL -- jauh lebih baik
+ * daripada dua-ambang-bulat naif yang ada sebelumnya (<=3/>=5, zona mati 4 mV,
+ * gampang berkedip), tapi BELUM diverifikasi di board TANPA-SENTUH ini.
+ * Board ini memakai backlight duty 204 (LCD_BL_TERANG di .ino), BUKAN 153 --
+ * beban lebih besar berarti sag yang dihasilkan probe kemungkinan juga lebih
+ * besar, jadi arah kesalahannya (kalau ada) adalah ambang di bawah ini
+ * TERLALU KETAT untuk board ini, bukan terlalu longgar. Ukur ulang dengan
+ * perintah konsol `sag` (satu bacaan) dan `layar` (menggilir layar berulang
+ * lewat jalur probe yang sama, tanpa perlu menekan tombol) sambil dicolok
+ * DAN di baterai, baca `[probe] ... sag=... pakai=...` di Serial, lalu
+ * sesuaikan konstanta ini kalau polanya beda dari touchscreen/.
+ *
+ * Mekanismenya (tidak berubah dari touchscreen/, ini bagian yang sudah
+ * terbukti benar arsitekturnya, cuma angkanya yang perlu dicek ulang):
+ *   sag <= SAG_COLOK_YAKIN   satu probe cukup menyalakan (sumber teregulasi
+ *                            tidak punya penjelasan lain)
+ *   sag <= SAG_COLOK         "mirip dicolok"; DUA probe berturut-turut menyalakan
+ *   sag >= SAG_BATERAI       jelas di luar rentang tercolok; satu probe cukup
+ *                            memadamkan
+ *   DUA probe berturut-turut > SAG_BUKAN_COLOK -> padam (ini yang mencegah
+ *   ikon "tersangkut menyala" sesudah kabel dicabut saat sel penuh -- tidak
+ *   ada probe pun yang perlu sampai SAG_BATERAI, cukup semuanya bukan
+ *   pembacaan sumber teregulasi). */
+#ifndef SAG_COLOK_YAKIN_F
+#define SAG_COLOK_YAKIN_F  -0.5f
+#endif
+#ifndef SAG_COLOK_F
+#define SAG_COLOK_F        1.0f
+#endif
+/* Memadamkan butuh bukti yang LEBIH KUAT daripada batas menyalakan (histeresis):
+ * bacaan tercolok mendarat di -0,9..+1,5 sesudah kompensasi, jadi batas "bukan
+ * tercolok" yang sama dengan batas menyalakan (1,0) membuat derau sekecil apa
+ * pun memadamkan ikon saat kabel masih tertancap -- terbukti di simulasi (ikon
+ * berkedip 2-6 kali dalam 20 menit tercolok). */
+#ifndef SAG_BATERAI_F
+#define SAG_BATERAI_F      3.0f      /* satu probe cukup memadamkan            */
+#endif
+#ifndef SAG_BUKAN_COLOK_F
+#define SAG_BUKAN_COLOK_F  1.8f      /* dua probe berturut-turut > ini memadamkan */
+#endif
+/* Bias polaritas untuk probe TUNGGAL (belum ada pasangannya). DIPINDAHKAN dari
+ * touchscreen/ (16 probe di board LAIN: layar-ON +0,7..+2,7, layar-OFF
+ * -1,1..-3,1 -- transien turun ~1,7 mV sesudah tiap perubahan layar, ON
+ * terbaca kebesaran dan OFF kekecilan). BELUM diukur ulang di board ini --
+ * transiennya bergantung pada arus backlight (duty 204 di sini vs 153 di
+ * touchscreen), jadi besarnya kemungkinan beda. Cek dengan perintah `layar`
+ * berulang kali dan lihat pola +/- di baris `[probe]`, lalu sesuaikan kalau
+ * perlu. Probe yang punya pasangan berlawanan (satu ON satu OFF berdekatan)
+ * memakai rata-ratanya (transien meniadakan diri), bukan bias ini. */
+#ifndef SAG_BIAS_ON_F
+#define SAG_BIAS_ON_F      1.2f
+#endif
+#ifndef SAG_BIAS_OFF_F
+#define SAG_BIAS_OFF_F    -2.2f
+#endif
+#define SAG_PROBE_N        64          /* sampel rata-rata pembacaan sesudah beban berubah */
 #define PROBE_SETTLE_MS  300
+
+/* ---- Jalur cepat "baru dicolok" ----
+ *
+ * Langkah 50 mV di atas bekerja pada EMA + median-15, dua penghalus yang sengaja
+ * lambat. Akibatnya dua hal yang terukur di simulasi (sel 1500 mAh, charger 500
+ * mA): lonjakan 100 mV baru dikenali 2,5 detik setelah dicolok, 75 mV butuh 3,5
+ * detik, dan lonjakan <= 50 mV TIDAK PERNAH dikenali oleh langkah itu -- ia
+ * menunggu tren 3 menit (150 detik) sebelum ikon dan animasi charge muncul.
+ * Itulah "kadang delay": makin kecil lonjakannya (sel makin penuh, hambatan sel
+ * makin kecil), makin lama.
+ *
+ * Jalur ini membaca sampel segar tiap tick (median 3, tanpa cincin dan EMA) dan
+ * membandingkan TIGA tick terakhir dengan median 8 tick sebelumnya. Kenaikan
+ * harus bertahan semua tiga tick: pelepasan beban sesaat (layar mati +13 mV, LED
+ * PPG padam ~12 mV) bukan hanya lebih kecil dari ambang, ia juga tidak akan
+ * melewati konfirmasi. Ambang 40 mV berada di atas dua pelepasan itu ditambah
+ * satu sama lain, dan di bawah lonjakan colok terukur (+100..137 mV).
+ * Hanya untuk NAIK: mencabut tetap lewat langkah 50 mV yang lama, karena
+ * "kok ikon charge hilang" tidak dikeluhkan dan pelepasan beban radio yang
+ * panjang bisa menyerupai kenaikan. */
+#define FAST_N        12      /* 8 tick pembanding + 3 tick konfirmasi + 1 sela  */
+#define FAST_OLD      8
+#define FAST_CONFIRM  3
+#define FAST_STEP_MV  40
+static uint16_t s_fast[FAST_N];
+static int      s_fast_n = 0, s_fast_i = 0;
 
 static uint16_t s_step[STEP_SLOTS];
 static int      s_step_n = 0, s_step_i = 0;
 
-static int      s_probe_v0     = 0;
+static float    s_probe_v0f    = 0;   /* tegangan sebelum langkah beban (EMA desimal) */
+static float    s_ema_f        = 0;   /* EMA desimal per tick, acuan "sebelum" probe   */
+static bool     s_ema_ok       = false;
+static float    s_sag_f        = 0;
+static float    s_sag_pakai_f  = 0;   /* nilai terkompensasi/berpasangan yang dipakai keputusan */
+static uint8_t  s_pl_hist      = 0;   /* 3 probe terakhir, bit0 = terbaru, 1 = mirip dicolok */
+static uint8_t  s_pl_n         = 0;
+static uint8_t  s_bk_hist      = 0;   /* 2 probe terakhir, 1 = jelas bukan tercolok (> SAG_BUKAN_COLOK_F) */
+static float    s_prev_sag_f   = 0;   /* probe sebelumnya (untuk rata-rata pasangan) */
+static bool     s_prev_berat   = false;
+static uint32_t s_prev_ms      = 0;
+static uint32_t s_probe_seq    = 0;   /* bertambah tiap probe selesai (untuk log)    */
+static bool     s_probe_berat_terakhir = false;
 static uint32_t s_probe_ms     = 0;
 static bool     s_probe_nunggu = false;
 static bool     s_probe_ke_berat = false;
@@ -78,6 +219,20 @@ static bool     s_sag_ada      = false;
 static uint32_t s_probe_us     = 0;
 static uint32_t s_tren_sah_ms  = 0;   /* tren dibisukan sampai 3 mnt setelah ini */
 static uint32_t s_step_naik_ms = 0;   /* langkah-naik terakhir; menggerbang sag besar */
+static uint32_t s_step_turun_ms = 0;  /* langkah-turun terakhir; menggerbang probe dari pantulan konektor */
+
+/* Konektor USB bisa "memantul" -- kontak putus-nyambung dalam hitungan
+ * puluhan/ratusan ms sebelum benar-benar lepas -- dan probe sag cuma membaca
+ * SATU sampel sesaat, jadi rentan tertipu satu sentakan itu jadi "mirip
+ * dicolok". Aturan 3 (langkah tegangan) sudah membuktikan kabel benar-benar
+ * lepas lewat jendela 4 detik yang jauh lebih tahan pantulan; begitu itu
+ * terjadi, probe DIBISUKAN dari MENYALAKAN ulang untuk beberapa detik --
+ * gejalanya kalau tidak: ikon mengisi berkedip sekali (nyala lalu padam lagi)
+ * TEPAT saat kabel dicabut. Pendek saja (bukan 3 menit seperti gerbang
+ * s_step_naik_ms di aturan 2): pantulan konektor selesai dalam hitungan detik,
+ * bukan menit, dan gerbang yang kepanjangan menunda deteksi colok-ulang yang
+ * sungguhan kalau pengguna cabut-pasang cepat. */
+#define COLOK_BOUNCE_GUARD_MS 3000UL
 
 /* Acuan sejak nyala. Tanpa ini tidak ada cara membedakan dua sebab yang sama
  * sekali berbeda ketika persen tidak bergerak:
@@ -91,7 +246,20 @@ static uint32_t s_first_ms = 0;
 
 /* Kurva pelepasan Li-Po 1 sel. Hubungan tegangan-kapasitas jauh dari linear --
  * peta linear 3.3-4.2 V akan salah besar di tengah rentang. Titik-titik ini
- * diinterpolasi linear di antaranya. */
+ * diinterpolasi linear di antaranya.
+ *
+ * Titik teratas MASIH 4200 nominal datasheet -- BELUM diverifikasi dengan
+ * multimeter di board TANPA-SENTUH ini (papan berbeda dari touchscreen/, jadi
+ * toleransi resistor pembagi dan titik regulasi charger sungguhan bisa beda).
+ * Di touchscreen/ (board lain), pengukuran langsung di terminal sel saat
+ * plateau memberi 4190, bukan 4200 -- kemungkinan besar board ini juga
+ * meleset sedikit dari nominal, tapi arahnya belum tentu sama. Battery_update()
+ * memakai titik ini sebagai "sel sudah penuh" begitu fase CV plateau
+ * terdeteksi -- lihat cabang `cv` di sana -- jadi angka teratas kurva HARUS
+ * cocok dengan charger yang sungguhan dipakai. Ukur dengan multimeter di
+ * terminal sel (BUKAN di pin ADC) begitu `[batt] fase CV` sudah berjalan
+ * beberapa menit dan angkanya rata, lalu sesuaikan titik ini -- prosedur
+ * sama persis dengan yang dipakai untuk BATT_DIVIDER di config.h. */
 typedef struct { int mv; int pct; } curve_pt_t;
 static const curve_pt_t CURVE[] = {
   { 4200, 100 }, { 4100, 92 }, { 4000, 85 }, { 3950, 78 },
@@ -119,6 +287,46 @@ static int cmp_int(const void *a, const void *b) {
   return (*(const int *)a) - (*(const int *)b);
 }
 
+/* Rata-rata N sampel berurutan, dalam mV di sisi BATERAI, DESIMAL. Rata-rata
+ * bukan median: median atas pembacaan bulat tetap bulat (kelipatan ~3 mV di sisi
+ * baterai), padahal sag yang dibedakan cuma beberapa mV -- dan derau ADC (sebaran
+ * 2-4 mV) justru bekerja sebagai dither yang membuat rata-ratanya sub-langkah. */
+static float probe_rata_f(int n) {
+  long jumlah = 0;
+  for (int k = 0; k < n; k++) jumlah += analogReadMilliVolts(BATT_ADC_PIN);
+  return (float)jumlah * BATT_DIVIDER / (float)n;
+}
+
+/* Median seluruh slot penuh + slot yang sedang berjalan. Kurang dari 4 slot
+ * (baru boot, atau jendela baru dikosongkan oleh colok/cabut) belum punya arti
+ * statistik, jadi dipakai nilai penghalusan sesaat -- tidak diam pada nilai lama
+ * yang milik keadaan daya sebelumnya. */
+static int basis_mv(int sesaat) {
+  int v[WMIN_SLOTS + 1];
+  int n = 0;
+  for (int k = 0; k < s_wmin_n; k++) v[n++] = s_wmin[k];
+  v[n++] = s_slot_min;
+  if (n < 4) return sesaat;
+  qsort(v, n, sizeof(int), cmp_int);
+  return v[n / 2];
+}
+
+/* Kosongkan jendela 3 menit: isinya milik keadaan daya yang baru berakhir. */
+static void kosongkan_jendela(void) {
+  s_wmin_n = 0;
+  s_wmin_i = 0;
+  s_slot_min = s_batt_mv;
+  s_slot_ms  = millis();
+}
+
+/* Naik/turun 1% per selang, menuju target. Dipanggil tiap 500 ms. */
+static void geser_persen(int target, uint32_t selang_ms, bool boleh_turun) {
+  const uint32_t now = millis();
+  if ((uint32_t)(now - s_pct_ms) < selang_ms) return;
+  if (target > s_percent)                    { s_percent++; s_pct_ms = now; }
+  else if (boleh_turun && target < s_percent){ s_percent--; s_pct_ms = now; }
+}
+
 void battery_begin(void) {
   /* Atenuasi penuh supaya rentang ukur mencapai ~3.3 V: dengan pembagi 1:2
    * baterai 4.2 V muncul sebagai 2.1 V di pin. */
@@ -128,11 +336,11 @@ void battery_begin(void) {
 
 /* Buffer cincin: jendela median dibangun LINTAS pemanggilan, bukan di dalam
  * satu pemanggilan. Versi pertama kode ini mengambil 15 sampel berjarak 2 ms
- * sekaligus -- 30 ms memblokir, setara satu periode refresh LVGL penuh.
- * Sekarang tiap pemanggilan hanya ambil 3 sampel berurutan (~0.3 ms) lalu isi
- * cincin, jadi jendelanya justru jadi lebih panjang (~2.5 detik pada laju
- * 500 ms) yang malah lebih baik untuk menolak burst transmit Wi-Fi yang
- * berskala milidetik. */
+ * sekaligus -- 30 ms memblokir, setara satu periode refresh LVGL penuh, dan
+ * cukup untuk menunda pembacaan touch yang datanya cepat hilang. Sekarang tiap
+ * pemanggilan hanya ambil 3 sampel berurutan (~0.3 ms) lalu isi cincin, jadi
+ * jendelanya justru jadi lebih panjang (~2.5 detik pada laju 500 ms) yang
+ * malah lebih baik untuk menolak burst transmit Wi-Fi yang berskala milidetik. */
 static int  s_ring[SAMPLES];
 static int  s_ring_n = 0;
 static int  s_ring_i = 0;
@@ -154,10 +362,29 @@ static uint32_t s_hist_ms = 0;
 
 void battery_update(void) {
   s_counts = analogRead(BATT_ADC_PIN);   /* mentah: 4095 = saturasi */
+  int segar[3];
   for (int k = 0; k < 3; k++) {
-    s_ring[s_ring_i] = analogReadMilliVolts(BATT_ADC_PIN);  /* dikalibrasi eFuse */
+    segar[k] = analogReadMilliVolts(BATT_ADC_PIN);          /* dikalibrasi eFuse */
+    s_ring[s_ring_i] = segar[k];
     s_ring_i = (s_ring_i + 1) % SAMPLES;
     if (s_ring_n < SAMPLES) s_ring_n++;
+  }
+  /* Median 3 sampel segar tick ini -> jalur cepat "baru dicolok". */
+  {
+    int a = segar[0], b = segar[1], c = segar[2], m;
+    m = (a < b) ? ((b < c) ? b : ((a < c) ? c : a))
+                : ((a < c) ? a : ((b < c) ? c : b));
+    /* Rata-rata desimal, bukan median bulat: sag yang dicari beberapa mV dan
+     * ADC-nya berkuantisasi ~3 mV di sisi baterai, jadi hanya rata-rata atas
+     * derau yang bisa mengurai di bawah satu langkah kuantisasi. alpha 0,3
+     * (tetapan waktu ~1,4 detik) supaya sisa langkah beban sebelumnya <2%
+     * sebelum probe berikutnya. */
+    const float rata = (segar[0] + segar[1] + segar[2]) * BATT_DIVIDER / 3.0f;
+    if (s_ema_ok) s_ema_f += 0.3f * (rata - s_ema_f);
+    else          { s_ema_f = rata; s_ema_ok = true; }
+    s_fast[s_fast_i] = (uint16_t)(m * BATT_DIVIDER + 0.5f);
+    s_fast_i = (s_fast_i + 1) % FAST_N;
+    if (s_fast_n < FAST_N) s_fast_n++;
   }
 
   int s[SAMPLES];
@@ -191,10 +418,28 @@ void battery_update(void) {
     s_slot_min = s_batt_mv;                      /* mulai slot berikutnya */
   }
 
-  /* Minimum atas seluruh slot penuh + slot berjalan. */
-  int wmin = s_slot_min;
-  for (int k = 0; k < s_wmin_n; k++)
-    if (s_wmin[k] < wmin) wmin = s_wmin[k];
+  const uint32_t now = millis();
+  const uint32_t dt  = s_upd_ms ? (uint32_t)(now - s_upd_ms) : 0;
+  s_upd_ms = now;
+  const bool was_charging = s_charging;
+  int  step_pra_mv = 0;                 /* tegangan sebelum langkah colok, kalau ada */
+
+  /* Bukti pasti dari luar modul ini (boot tanpa tombol PWR, atau board masih
+   * hidup setelah latch dilepas): berlaku SEKETIKA, tanpa menunggu tegangan.
+   * Dijalankan SETELAH was_charging dicatat supaya lewat blok peralihan di
+   * bawah (persen dikoreksi, jendela dikosongkan) seperti colok biasa.
+   * s_step_naik_ms dipasang agar probe sag tidak bisa memadamkannya selama 3
+   * menit pertama -- gerbang yang sama dengan colok yang terdeteksi langkah. */
+  if (s_usb_bukti) {
+    s_usb_bukti = false;
+    if (!s_charging) {
+      s_charging     = true;
+      s_sebab        = "usb-pasti";
+      s_step_naik_ms = now;
+      s_tren_sah_ms  = now;
+      s_sag_ada      = false;
+    }
+  }
 
   /* ================= Apakah jam sedang dicolok? =================
    * Tiga aturan, dijalankan dari yang paling lemah ke yang paling kuat supaya
@@ -221,52 +466,90 @@ void battery_update(void) {
    * s_tren_sah_ms adalah penawar kemacetan di atas: setiap langkah membisukan
    * tren selama satu panjang jendela penuh, supaya ia tidak pernah menjawab
    * berdasarkan slot yang terkumpul SEBELUM keadaan dayanya berubah. Sengaja
-   * memakai stempel waktu, bukan mengosongkan s_wmin: jendela itu juga dasar
-   * perhitungan persen, dan persen tidak ada urusannya dengan ini. */
+   * memakai stempel waktu: kosongkan_jendela() memang dijalankan di tiap
+   * colok/cabut, tetapi rule 2 dan 3 bisa mengubah s_charging tanpa peralihan
+   * yang menguras jendela, dan tren tetap tidak boleh menjawab dari slot lama. */
   if (s_wmin_n >= WMIN_SLOTS &&
       (uint32_t)(millis() - s_tren_sah_ms) >= (uint32_t)WMIN_SLOTS * WMIN_SLOT_MS) {
     int oldest = s_wmin[s_wmin_i];               /* slot berikut = yang tertua */
     int newest = s_wmin[(s_wmin_i + WMIN_SLOTS - 1) % WMIN_SLOTS];
-    if (newest - oldest >= 20) s_charging = true;
+    if (newest - oldest >= 20) { s_charging = true; s_sebab = "tren"; }
   }
 
   /* ---- 2. Probe sag: memegang fase CV ----
    * Di sinilah tren buta total: saat sel hampir penuh charger meregulasi di
    * 4,2 V dan tegangannya RATA, jadi tidak ada tren untuk dilihat. Yang tetap
    * berbeda adalah tanggapannya terhadap beban -- charger menahan, baterai
-   * ambles. Terukur di board ini dengan backlight sebagai beban: dicolok
-   * -2..+1 mV, di baterai +6..+13 mV.
+   * ambles. Board touchscreen/ mengukur -2..+1 mV dicolok, +6..+13 mV di
+   * baterai (duty 204, SAMA seperti board ini) -- lihat SAG_*_F di atas untuk
+   * kenapa itu belum tentu langsung berlaku di sini.
    *
    * Jendela 300 ms cukup: tegangan mengikuti langkah beban dalam milidetik,
    * jauh lebih cepat daripada relaksasi kimia sel yang berskala detik. */
   if (s_probe_nunggu && (uint32_t)(millis() - s_probe_ms) >= PROBE_SETTLE_MS) {
     s_probe_nunggu = false;
     const uint32_t t0 = micros();
-    int v1  = battery_baca_langsung_mv(NULL);
+    const float v1f = probe_rata_f(SAG_PROBE_N);
     s_probe_us = micros() - t0;      /* satu-satunya pembacaan mahal yang tersisa */
-    int sag = s_probe_ke_berat ? (s_probe_v0 - v1) : (v1 - s_probe_v0);
-    s_sag_mv  = sag;
+    const float sag_f = s_probe_ke_berat ? (s_probe_v0f - v1f) : (v1f - s_probe_v0f);
+    s_sag_f   = sag_f;
+    s_sag_mv  = (int)(sag_f + (sag_f >= 0 ? 0.5f : -0.5f));
     s_sag_ada = true;
+    s_probe_seq++;
+    s_probe_berat_terakhir = s_probe_ke_berat;
 
-    /* Zona mati 4 mV di antara kedua ambang sengaja dibiarkan TIDAK memutuskan
-     * apa-apa. Pengulangan pengukuran ini +-2 mV (terbaca dari empat probe
-     * berturut-turut saat dicolok: -2, 0, 0, +1), jadi nilai di antara 4 dan 5
-     * tidak bisa dibedakan dari derau -- dan menebak di situ berarti ikonnya
-     * berkedip, yaitu keluhan yang memulai semua ini.
-     *
-     * Sag KECIL boleh langsung menyalakan: sumber teregulasi tidak punya
-     * penjelasan lain. Sag BESAR tidak simetris -- ia muncul baik di baterai
-     * MAUPUN saat mengisi di fase CC, jadi ia hanya boleh memadamkan setelah
-     * langkah-naik terakhir cukup lama berlalu sehingga aturan 1 sudah punya
-     * jendela penuh untuk berbicara. Tanpa gerbang itu, mencolok charger ke
-     * baterai yang benar-benar kosong akan memadamkan ikonnya sendiri beberapa
-     * detik kemudian. */
-    if (sag <= SAG_COLOK_MAX) {
+    /* Rata-rata PASANGAN. Terukur di jam ini saat tercolok: probe layar-OFF
+     * -1,1..-2,6 mV, layar-ON +0,7..+1,4 mV -- bertanda berlawanan, karena
+     * sesudah tiap perubahan layar ada transien turun ~1,5 mV yang mengurangi
+     * pembacaan "naik" (OFF) dan menambah pembacaan "turun" (ON). Sag sungguhan
+     * sama untuk keduanya, sedangkan transien berlawanan tanda, jadi rata-rata
+     * satu probe ON dan satu OFF yang berdekatan meniadakan transien itu.
+     * Tanpa ini satu probe OFF di baterai (sag 3 mV - 2 mV transien = 1 mV)
+     * terbaca "mirip dicolok". */
+    float sag_pakai = sag_f - (s_probe_ke_berat ? SAG_BIAS_ON_F : SAG_BIAS_OFF_F);
+    if (s_prev_ms && (uint32_t)(millis() - s_prev_ms) < 90000UL &&
+        s_prev_berat != s_probe_ke_berat)
+      sag_pakai = 0.5f * (sag_f + s_prev_sag_f);
+    s_sag_pakai_f = sag_pakai;
+    s_prev_sag_f = sag_f;
+    s_prev_berat = s_probe_ke_berat;
+    s_prev_ms    = millis();
+
+    const bool mirip_colok = sag_pakai <= SAG_COLOK_F;
+    s_pl_hist = (uint8_t)(((s_pl_hist << 1) | (mirip_colok ? 1 : 0)) & 7);
+    s_bk_hist = (uint8_t)(((s_bk_hist << 1) | (sag_pakai > SAG_BUKAN_COLOK_F ? 1 : 0)) & 3);
+    if (s_pl_n < 3) s_pl_n++;
+
+    /* Menyalakan: yakin dalam satu probe, atau dua probe berturut-turut yang
+     * sama-sama mirip sumber teregulasi -- KECUALI kabel baru saja terbukti
+     * lepas lewat langkah tegangan (lihat COLOK_BOUNCE_GUARD_MS): itu tandanya
+     * bacaan "mirip dicolok" ini kemungkinan besar pantulan konektor, bukan
+     * kabel yang balik tercolok sungguhan. */
+    const bool baru_cabut = s_step_turun_ms &&
+        (uint32_t)(millis() - s_step_turun_ms) < COLOK_BOUNCE_GUARD_MS;
+    if (!baru_cabut &&
+        (sag_pakai <= SAG_COLOK_YAKIN_F || (s_pl_n >= 2 && (s_pl_hist & 3) == 3))) {
       s_charging = true;
-    } else if (sag >= SAG_BATERAI_MIN &&
-               (uint32_t)(millis() - s_step_naik_ms) >=
-                   (uint32_t)WMIN_SLOTS * WMIN_SLOT_MS) {
-      s_charging = false;
+      s_sebab    = "probe-sag";
+    } else {
+      /* Memadamkan. Sag BESAR tidak simetris -- ia muncul baik di baterai
+       * MAUPUN saat mengisi di fase CC (charger bekerja sebagai sumber ARUS),
+       * jadi dua pengaman tetap: langkah-naik terakhir harus sudah cukup lama
+       * berlalu supaya aturan 1 sempat punya jendela penuh, dan tegangan tidak
+       * boleh sedang naik (>= 6 mV per 3 menit = masih fase CC). Tanpa
+       * keduanya, mencolok charger ke baterai kosong memadamkan ikonnya
+       * sendiri beberapa detik kemudian. */
+      const bool dua_bukan    = (s_pl_n >= 2 && s_bk_hist == 3);
+      const bool pasti_baterai = sag_pakai >= SAG_BATERAI_F;
+      bool masih_naik = false;
+      if (s_wmin_n >= WMIN_SLOTS)
+        masih_naik = (s_wmin[(s_wmin_i + WMIN_SLOTS - 1) % WMIN_SLOTS] -
+                      s_wmin[s_wmin_i]) >= CV_PLATEAU_MV;
+      if ((pasti_baterai || dua_bukan) && !masih_naik &&
+          (uint32_t)(millis() - s_step_naik_ms) >=
+              (uint32_t)WMIN_SLOTS * WMIN_SLOT_MS) {
+        s_charging = false;
+      }
     }
   }
 
@@ -281,30 +564,159 @@ void battery_update(void) {
   s_step_i = (s_step_i + 1) % STEP_SLOTS;
   if (s_step_n < STEP_SLOTS) s_step_n++;
 
+  bool naik_cepat = false;
+  if (s_fast_n >= FAST_N) {
+    int lama_v[FAST_OLD];
+    for (int k = 0; k < FAST_OLD; k++) lama_v[k] = s_fast[(s_fast_i + k) % FAST_N];
+    qsort(lama_v, FAST_OLD, sizeof(int), cmp_int);
+    const int med = lama_v[FAST_OLD / 2];
+    int terendah = 100000;                       /* terendah dari tick konfirmasi */
+    for (int k = FAST_N - FAST_CONFIRM; k < FAST_N; k++) {
+      int v = s_fast[(s_fast_i + k) % FAST_N];
+      if (v < terendah) terendah = v;
+    }
+    naik_cepat = (terendah - med) >= FAST_STEP_MV;
+  }
+
   if (s_step_n >= STEP_SLOTS) {
     int lama = s_step[s_step_i];
     int baru = s_step[(s_step_i + STEP_SLOTS - 1) % STEP_SLOTS];
-    if (baru - lama >= STEP_MV) {
+    if (baru - lama >= STEP_MV || naik_cepat) {
       s_charging     = true;
+      s_sebab        = naik_cepat ? "cepat" : "langkah";
+      step_pra_mv    = lama;
       s_step_naik_ms = millis();
       s_tren_sah_ms  = millis();     /* bisukan tren: slotnya milik keadaan lama */
       s_sag_ada      = false;
     } else if (lama - baru >= STEP_MV) {
       s_charging     = false;
+      s_step_turun_ms = millis();
       s_tren_sah_ms  = millis();
       s_sag_ada      = false;
     }
   }
 
-  s_base_mv = wmin;
-  int p = mv_to_percent(s_base_mv);
+  /* ================= Persen =================
+   * Lihat "persen: TIGA keadaan" di atas untuk alasan tiap cabang. */
 
-  /* Histeresis ASIMETRIS. Versi sebelumnya memakai |selisih| > 1 di kedua arah,
-   * sehingga penurunan 1% tidak pernah tampil -- baterai harus turun 2% dulu
-   * sebelum angkanya bergerak, dan itulah sebab angkanya terasa "macet".
-   * Sekarang: turun 1% langsung tampil (itu informasi yang dicari pemakai),
-   * naik butuh 2% supaya tidak bergetar di ambang. */
-  if (p < s_percent || p >= s_percent + 2 || s_percent == 0) s_percent = p;
+  /* Peralihan colok/cabut. Persen yang tampil TIDAK disentuh sama sekali --
+   * hanya jendela tegangan dan penghitung CV yang dikosongkan.
+   *
+   * Sengaja tidak ada koreksi "boot di USB" (angka awal dibaca dari tegangan
+   * charger kalau kabel sudah tertancap sebelum jam menyala, jadi ia tinggi
+   * ~5-10% sampai selnya mengejar). Sudah dicoba dan dibuang: satu-satunya
+   * sinyal yang ada untuk kasus itu adalah probe sag, yang punya positif-palsu
+   * sesekali di baterai, dan positif-palsu itu bisa bertahan menit-menit
+   * (pemadamannya digerbang 3 menit sejak boot, dan tanpa ketukan layar tidak
+   * ada probe baru). Menurunkan angka atas dasar sinyal itu menciptakan persis
+   * "ngedrop" yang mau dihilangkan -- simulasi menunjukkan 74% -> 58% di baterai
+   * biasa. Angka yang terlalu tinggi sedikit dan menyusut sendiri lebih murah
+   * daripada angka yang jatuh tanpa sebab. */
+  if (!was_charging && s_charging) {
+    /* Besar koreksi tegangan (arus x hambatan dalam) bergantung pada charger dan
+     * sel yang dipakai, jadi diukur sendiri dari lonjakan saat dicolok -- BUKAN
+     * dipatok. Ditunda 10 detik: saat langkah baru terdeteksi (melewati 50 mV)
+     * EMA baru menempuh separuh jalan, dan membacanya saat itu memberi angka
+     * separuh dari yang sebenarnya. Tanpa langkah (terdeteksi lewat probe atau
+     * tren) dipakai nilai bawaan BATT_CHG_IR_MV. */
+    s_pl_hist = 0; s_bk_hist = 0; s_pl_n = 0; s_prev_ms = 0;
+    s_chg_ir_mv = BATT_CHG_IR_MV;
+    s_ir_ms     = step_pra_mv ? now : 0;
+    s_ir_pre_mv = step_pra_mv;
+    kosongkan_jendela();
+    s_cv_ms  = 0;
+    s_pct_ms = now;
+  } else if (was_charging && !s_charging) {
+    s_pl_hist = 0; s_bk_hist = 0; s_pl_n = 0; s_prev_ms = 0;
+    s_ir_ms = 0;
+    kosongkan_jendela();
+    s_cv_ms  = 0;
+    s_pct_ms = now;
+  }
+
+  const int basis = basis_mv(s_batt_mv);
+  s_base_mv = basis;
+
+  if (!s_percent_init) {
+    /* Boot di USB yang DIKETAHUI (s_charging sudah true di sini): tegangan
+     * pertama adalah tegangan charger, jadi dikoreksi sejak angka pertama. */
+    const int v = mv_to_percent(basis - (s_charging ? s_chg_ir_mv : 0));
+    /* Lanjutkan dari persen yang TAMPIL sebelum jam mati, kalau masih masuk akal
+     * (dalam PCT_LANJUT_PCT dari hitungan tegangan sekarang). Bacaan boot satu
+     * kali derau dan tegangan berbeban, sedangkan angka tersimpan adalah hasil
+     * berjam-jam penghalusan. Di luar rentang itu sel jelas berubah selama mati
+     * (dicas atau terkuras) dan tegangan yang dipercaya. */
+    if (s_tersimpan > 0 && abs(v - s_tersimpan) <= PCT_LANJUT_PCT) s_percent = s_tersimpan;
+    else                                                           s_percent = v;
+    s_percent_init = 1;
+    s_pct_ms       = now;
+  } else if (s_charging) {
+    /* Fase CV: tegangan menempel di plafon charger, jadi tidak ada lagi yang
+     * bisa dibaca darinya lewat KOREKSI (arus sudah kecil, IR drop ikut kecil).
+     * Dikenali dari dua hal supaya tidak bergantung pada ketepatan BATT_DIVIDER:
+     * sudah di atas BATT_CV_MV, atau rata (kenaikan jendela 3 menit di bawah
+     * CV_PLATEAU_MV) di wilayah BATT_CV_PLATEAU_MIN_MV ke atas. */
+    int naik = 999;                                /* belum ada jendela penuh */
+    if (s_wmin_n >= WMIN_SLOTS)
+      naik = s_wmin[(s_wmin_i + WMIN_SLOTS - 1) % WMIN_SLOTS] - s_wmin[s_wmin_i];
+    if (s_ir_ms && (uint32_t)(now - s_ir_ms) >= 10000UL) {
+      int ir = s_batt_mv - s_ir_pre_mv;
+      s_chg_ir_mv = ir < 50 ? 50 : (ir > 150 ? 150 : ir);   /* langkah terdeteksi >= 50 */
+      s_ir_ms = 0;
+    }
+    const bool cv = basis >= BATT_CV_MV ||
+                     (basis >= BATT_CV_PLATEAU_MIN_MV && naik < CV_PLATEAU_MV);
+    if (cv) s_cv_ms += dt;                          /* diagnostik saja, lihat battery_cv_detik() */
+
+    int target;
+    if (cv) {
+      /* ASUMSI dipindahkan dari touchscreen/ (board LAIN, TERBUKTI di sana dengan
+       * multimeter dua kali): begitu plateau, tegangan di pin dan di terminal
+       * sel jadi SAMA -- arus sudah terlalu kecil untuk menjatuhkan tegangan
+       * lewat kabel/hambatan dalam. BELUM diverifikasi dengan multimeter di
+       * board TANPA-SENTUH ini -- kalau meragukan, ukur dengan cara yang sama
+       * (pin BATT vs terminal sel, saat `[batt] fase CV` sudah berjalan
+       * beberapa menit) sebelum mempercayai penuh. Kalau terbukti benar,
+       * tegangan mentah di sini SUDAH BOLEH dipakai apa adanya, tanpa
+       * s_chg_ir_mv (yang dipelajari dari lonjakan AWAL colok, saat arus masih
+       * besar -- sudah tidak berlaku lagi di titik ini) dan tanpa menunggu.
+       *
+       * Versi sebelumnya menebak lewat penghitung waktu (CV_START_PCT merayap
+       * ke 99% selama BATT_CV_FULL_MIN menit) karena belum ada cara memastikan
+       * tegangan mentah bisa dipercaya. Sekarang ada -- dibuang. */
+      target = mv_to_percent(basis);
+    } else {
+      /* Masih fase aktif (CC, atau baru masuk CV dan belum plateau): arus
+       * nyata mengalir, tegangan masih membawa IR drop, jadi tetap dikoreksi.
+       * Mentok 99% -- kalau tegangan mentahnya sendiri sudah menunjuk 100%,
+       * cabang `cv` di atas semestinya sudah menyalakan lebih dulu. */
+      target = mv_to_percent(basis - s_chg_ir_mv);
+      if (target > 99) target = 99;
+    }
+
+    /* Naik: LANGSUNG kalau cv (tegangan sendiri sudah bukti kuat, tidak perlu
+     * dipelankan lagi -- itulah yang membuat 100% muncul seketika begitu
+     * tegangan sampai, bukan menunggu waktu tambahan) -- selain itu (fase CC)
+     * tetap dipelankan BATT_CHG_MAX_PCT_MIN per menit seperti sebelumnya,
+     * karena koreksinya cuma tebakan dan belum tentu tepat.
+     * Turun: selalu pelan (PCT_TURUN_MS) -- baik cv atau tidak, penurunan di
+     * sini cuma bisa berarti derau atau charger yang diam-diam berhenti,
+     * bukan sesuatu yang harus langsung dipercaya. */
+    if (target >= s_percent) {
+      if (cv) s_percent = target;
+      else    geser_persen(target, 60000UL / BATT_CHG_MAX_PCT_MIN, false);
+    } else {
+      geser_persen(target, PCT_TURUN_MS, true);
+    }
+  } else {
+    /* Turun 1% langsung tampil (itu yang dicari pemakai); naik hanya kalau
+     * selisihnya nyata -- pemulihan setelah beban dilepas, bukan derau. Baterai
+     * yang sedang dipakai tidak mungkin bertambah isinya, jadi kenaikan kecil
+     * hanya boleh dianggap getaran ambang. */
+    const int target = mv_to_percent(basis);
+    if (target < s_percent)                      geser_persen(target, PCT_TURUN_MS, true);
+    else if (target >= s_percent + PCT_NAIK_MIN) geser_persen(target, PCT_NAIK_MS, false);
+  }
 
   /* Catat satu titik per menit. */
   if (!s_hist_ms || (uint32_t)(millis() - s_hist_ms) >= 60000UL) {
@@ -328,6 +740,10 @@ void battery_history(char *buf, int n) {
 int battery_history_count(void) { return s_hist_n; }
 
 int  battery_floor_mv(void)       { return s_base_mv; }
+int  battery_cv_detik(void)       { return (int)(s_cv_ms / 1000UL); }
+const char *battery_sebab_mengisi(void) { return s_sebab; }
+void battery_usb_pasti(void)            { s_usb_bukti = true; }
+void battery_set_tersimpan(int pct)     { s_tersimpan = pct; }
 bool battery_charging(void)       { return s_charging; }
 int  battery_percent(void)        { return s_percent; }
 int  battery_millivolts(void)     { return s_batt_mv; }
@@ -390,13 +806,17 @@ void battery_beban_akan_berubah(bool jadi_berat) {
     return;
   }
 
-  s_probe_v0       = s_batt_mv;
+  s_probe_v0f      = s_ema_ok ? s_ema_f : (float)s_batt_mv;
   s_probe_ms       = sekarang;
   s_probe_ke_berat = jadi_berat;
   s_probe_nunggu   = true;
 }
 
 int  battery_sag_mv(void)   { return s_sag_mv; }
+uint32_t battery_probe_seq(void)         { return s_probe_seq; }
+float    battery_probe_sag_f(void)       { return s_sag_f; }
+float    battery_probe_pakai_f(void)     { return s_sag_pakai_f; }
+bool     battery_probe_berat(void)       { return s_probe_berat_terakhir; }
 bool battery_sag_valid(void){ return s_sag_ada; }
 
 uint32_t battery_probe_us(void) { return s_probe_us; }
