@@ -248,21 +248,24 @@ static uint32_t s_first_ms = 0;
  * peta linear 3.3-4.2 V akan salah besar di tengah rentang. Titik-titik ini
  * diinterpolasi linear di antaranya.
  *
- * Titik teratas MASIH 4200 nominal datasheet -- BELUM diverifikasi dengan
- * multimeter di board TANPA-SENTUH ini (papan berbeda dari touchscreen/, jadi
- * toleransi resistor pembagi dan titik regulasi charger sungguhan bisa beda).
- * Di touchscreen/ (board lain), pengukuran langsung di terminal sel saat
- * plateau memberi 4190, bukan 4200 -- kemungkinan besar board ini juga
- * meleset sedikit dari nominal, tapi arahnya belum tentu sama. Battery_update()
- * memakai titik ini sebagai "sel sudah penuh" begitu fase CV plateau
- * terdeteksi -- lihat cabang `cv` di sana -- jadi angka teratas kurva HARUS
- * cocok dengan charger yang sungguhan dipakai. Ukur dengan multimeter di
- * terminal sel (BUKAN di pin ADC) begitu `[batt] fase CV` sudah berjalan
- * beberapa menit dan angkanya rata, lalu sesuaikan titik ini -- prosedur
- * sama persis dengan yang dipakai untuk BATT_DIVIDER di config.h. */
+ * Titik teratas 4190 (bukan 4200 nominal datasheet), DIPINDAHKAN dari
+ * touchscreen/battery.cpp (board LAIN, BELUM diverifikasi ulang secara
+ * independen dengan multimeter di board TANPA-SENTUH ini -- toleransi
+ * resistor pembagi dan titik regulasi charger sungguhan bisa beda antar
+ * papan). Di touchscreen/, 4190 terukur LANGSUNG dengan multimeter di
+ * terminal sel, saat arus cas sudah plateau (empat kali, konsisten) --
+ * charger sungguhan berhenti menaik di situ, bukan di 4200 yang cuma asumsi
+ * datasheet. Battery_update() memakai titik ini sebagai "sel sudah penuh"
+ * begitu fase CV plateau terdeteksi -- lihat cabang `cv` di sana -- jadi
+ * angka teratas kurva HARUS cocok dengan charger yang sungguhan dipakai DI
+ * BOARD INI, bukan angka buku maupun angka board lain. Ukur ulang dengan
+ * multimeter di terminal sel (BUKAN di pin ADC) begitu `[batt] fase CV`
+ * sudah berjalan beberapa menit dan angkanya rata, lalu sesuaikan titik ini
+ * kalau plateau-nya ternyata di tempat lain -- prosedur sama persis dengan
+ * yang dipakai untuk BATT_DIVIDER di config.h. */
 typedef struct { int mv; int pct; } curve_pt_t;
 static const curve_pt_t CURVE[] = {
-  { 4200, 100 }, { 4100, 92 }, { 4000, 85 }, { 3950, 78 },
+  { 4190, 100 }, { 4100, 92 }, { 4000, 85 }, { 3950, 78 },
   { 3900,  70 }, { 3850, 62 }, { 3800, 55 }, { 3750, 47 },
   { 3700,  40 }, { 3650, 33 }, { 3600, 25 }, { 3550, 18 },
   { 3500,  12 }, { 3450,  8 }, { 3400,  5 }, { 3300,  2 },

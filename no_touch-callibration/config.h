@@ -75,58 +75,75 @@
  */
 #define BATT_ADC_PIN    0
 
-/* Dikalibrasi memakai charger sebagai referensi tegangan -- TEBAKAN, belum
- * pernah dicek dengan multimeter sungguhan di board TANPA-SENTUH ini.
+/* BELUM diukur dengan multimeter sungguhan di board TANPA-SENTUH ini secara
+ * independen -- angka di bawah DIPINDAHKAN dari touchscreen/config.h (papan
+ * LAIN) atas keputusan eksplisit, sebagai titik awal yang jauh lebih baik
+ * daripada tebakan murni datasheet (rasio nominal pembagi 200k/100k = 3.00
+ * mengabaikan toleransi resistor dan offset ADC), TAPI belum tentu pas persis
+ * untuk board ini (resistor pembagi beda unit, toleransi ADC beda chip).
  *
- * Nominal pembagi 200k/100k = 3.00, tapi itu mengabaikan toleransi resistor dan
- * offset ADC. Angka 2.97 di bawah menebak charger sudah rata di 4.200 V persis
- * saat pengisian dianggap selesai (raw 1414 mV -> 4200/1414 = 2.97) -- asumsi
- * dari datasheet Li-Po, BUKAN pengukuran.
+ * Riwayat pengukuran di touchscreen/ (BUKAN board ini): kalibrasi pertama
+ * (2.97) menebak charger rata di 4.200 V persis saat pengisian dianggap
+ * selesai (raw 1414 mV -> 4200/1414 = 2.97), tanpa multimeter. Diukur
+ * sungguhan LANGSUNG DI PIN BATT (titik yang sama dengan pembagi ADC --
+ * bukan di terminal sel kalau sedang dicas, karena keduanya beda selama arus
+ * masih mengalir): dua pengukuran independen, keduanya 4,19 V, bertepatan
+ * dengan raw 1382 dan 1382-1383 mV -- rasio 3,0318 dan 3,0307, SEPAKAT sampai
+ * 0,04%. Dipakai rata-ratanya, 3,031.
  *
- * Board touchscreen/ (papan LAIN, jangan disamakan) pernah memakai tebakan yang
- * sama persis, dan setelah diukur sungguhan dengan multimeter LANGSUNG DI PIN
- * BATT (titik yang sama dengan pembagi ADC -- bukan di terminal sel kalau
- * sedang dicas, karena keduanya beda selama arus masih mengalir) ternyata
- * rasio sebenarnya 3,031, bukan 2,97 -- meleset ~2%. Board ini kemungkinan
- * meleset juga, tapi BESAR dan ARAHNYA belum tentu sama (resistor pembagi
- * beda unit, toleransi ADC beda chip).
+ * Kenapa presisi ini penting: kurva memetakan apa pun >= BATT_CV_MV di sisi
+ * sel menjadi 100%. Rasio yang kekecilan membuat baterai yang SUDAH 100%
+ * masih terbaca di bawahnya -- angka mentok padahal selnya sudah penuh.
+ * Rasio yang kebesaran membuat sebaliknya: "selalu 100%" padahal baru
+ * terkuras sedikit.
  *
- * Cara kalibrasi ulang (sama seperti yang dipakai di touchscreen/): sambungkan
- * ke charger, baca angka "raw" di baris [batt] pada Serial, ukur tegangan DI
- * PIN BATT board dengan multimeter di saat yang sama, lalu
- * BATT_DIVIDER = Vukur / (raw dalam volt). Ulangi 2-3 kali di level baterai
- * berbeda untuk memastikan hasilnya konsisten sebelum dipakai. */
-#define BATT_DIVIDER    2.97f
+ * Untuk kalibrasi ulang KHUSUS board ini (sangat dianjurkan sebelum
+ * mempercayai angka ini penuh): sambungkan ke charger, baca angka "raw" di
+ * baris [batt] pada Serial, ukur tegangan DI PIN BATT board (titik yang sama
+ * dengan pembagi ADC, bukan di terminal sel kalau sedang dicas) dengan
+ * multimeter di saat yang sama, lalu BATT_DIVIDER = Vukur / (raw dalam
+ * volt). Ulangi 2-3 kali di level baterai berbeda untuk memastikan hasilnya
+ * konsisten sebelum dipakai. */
+#define BATT_DIVIDER    3.031f
 
 /* ---- Persen saat DICAS (battery.cpp) ----
  *
  * Selama kabel tertancap DAN arus masih mengalir, tegangan di pin BUKAN
  * tegangan sel: charger menaikkannya sebesar arus x hambatan (sel + kabel +
- * konektor). Di touchscreen/ (papan lain) terukur +100 mV dalam 1-2 detik saat
- * dicolok -- BELUM diukur di board ini, tapi mekanismenya sama (sel Li-Po 1
- * cell, charger CC/CV yang serupa), jadi dipakai angka yang sama sebagai titik
- * awal.
+ * konektor). Terukur di touchscreen/ (papan LAIN, BELUM diukur ulang secara
+ * independen di board TANPA-SENTUH ini): mencolok kabel menggeser tegangan
+ * +100 mV dalam 1-2 detik, sebelum sel menerima muatan sedikit pun -- kurva
+ * Li-Po membaca +100 mV itu sebagai ~+8% (itulah "cepat penuh" dan "ngedrop"
+ * 8-15% saat kabel dicabut). Mekanismenya sama (sel Li-Po 1 cell, charger
+ * CC/CV yang serupa), jadi dipakai angka yang sama sebagai titik awal.
  *
  * BATT_CV_MV dan `cv` di battery.cpp (bukan lagi penghitung waktu BATT_CV_FULL_MIN
- * yang sudah dibuang) memakai asumsi yang SAMA dengan touchscreen/: begitu
+ * yang sudah dibuang) memakai asumsi yang SAMA dengan touchscreen/, TERBUKTI
+ * LANGSUNG dengan multimeter di SANA (dua kali, BUKAN di board ini): begitu
  * plateau, tegangan pin dan sel jadi sama persis, jadi tegangan mentah boleh
- * dipercaya tanpa koreksi maupun jeda waktu. Verifikasi asumsi ini di board ini
- * sebelum benar-benar mempercayainya (ukur pin BATT vs terminal sel saat
- * `[batt] fase CV` sudah berjalan beberapa menit) -- lihat komentar CURVE di
- * battery.cpp untuk detail.
+ * dipercaya tanpa koreksi maupun jeda waktu. Verifikasi ulang asumsi ini
+ * KHUSUS di board ini sebelum benar-benar mempercayainya (ukur pin BATT vs
+ * terminal sel saat `[batt] fase CV` sudah berjalan beberapa menit) -- lihat
+ * komentar CURVE di battery.cpp untuk detail.
  *
  *   BATT_CHG_IR_MV       koreksi yang dikurangkan dari tegangan HANYA selagi
- *                        arus masih nyata mengalir (belum plateau).
+ *                        arus masih nyata mengalir (belum plateau) -- lihat
+ *                        cabang `cv` di battery_update().
  *   BATT_CV_MV           tegangan (sisi baterai) yang dianggap sudah fase CV
  *                        -- begitu tercapai, persen dibaca LANGSUNG dari
- *                        tegangan, naik seketika kalau tegangan mendukung,
- *                        turun pelan kalau ternyata cuma derau.
+ *                        tegangan (tanpa koreksi, tanpa nunggu), naik seketika
+ *                        kalau tegangan mendukung, turun pelan kalau ternyata
+ *                        cuma derau. Tidak wajib tepat: rata-nya tegangan
+ *                        (naik < 6 mV per 3 menit di atas BATT_CV_PLATEAU_MIN_MV)
+ *                        juga dianggap CV.
  *   BATT_CHG_MAX_PCT_MIN persen tertinggi yang boleh bertambah per menit
- *                        SEBELUM plateau (fase CC). Batas fisik: sel tidak
- *                        bisa terisi lebih cepat dari arus chargernya --
- *                        sesuaikan dengan kapasitas sel & arus charger board
- *                        ini kalau beda dari asumsi 1500 mAh / ~500 mA di
- *                        touchscreen/. */
+ *                        SEBELUM plateau (fase CC, saat koreksi IR di atas
+ *                        masih dipakai) -- bukan lagi berlaku sesudah plateau,
+ *                        karena tegangan sendiri sudah jadi bukti langsung.
+ *                        Batas fisik: sel tidak bisa terisi lebih cepat dari
+ *                        arus chargernya -- sesuaikan dengan kapasitas sel &
+ *                        arus charger board ini kalau beda dari asumsi
+ *                        1500 mAh / ~500 mA di touchscreen/. */
 #define BATT_CHG_IR_MV        100
 #define BATT_CV_MV            4170
 /* Batas bawah "plateau" yang dianggap fase CV. Plateau di bawah ini (charger

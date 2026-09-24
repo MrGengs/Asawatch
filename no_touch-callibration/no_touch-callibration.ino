@@ -109,7 +109,7 @@ typedef enum { TBL_MATI = 0, TBL_UKUR, TBL_SELESAI_MAKAN, TBL_CEK_MANUAL } tombo
  * #include -- sebelum typedef yang ditulis di dekat pemakainya sendiri sempat
  * ada. Definisi ukuran/posisi ikon baterai yang sesungguhnya tetap di bagian
  * Geometri seperti biasa; ini cuma bentuk handle-nya. */
-#define BATT_N_KOTAK 3
+#define BATT_N_KOTAK 4
 typedef struct {
   lv_obj_t *cangkang, *nub, *petir;
   lv_obj_t *kotak[BATT_N_KOTAK];
@@ -475,22 +475,27 @@ static void layar_nyala_sementara(uint32_t ms) {
 /* ---- Ikon baterai berkotak ----
  * Bentuknya mengikuti images (2).jpeg. Proporsinya diukur dari gambar itu, di
  * garis tengah badannya: garis 17, jarak 8, lalu kotak 60 - celah 12 - kotak 60
- * - celah 12 - kotak 60, jarak 8, garis 17 -- total badan 254 px.
+ * - celah 12 - kotak 60, jarak 8, garis 17 -- total badan 254 px (rujukan asli
+ * TIGA kotak; EMPAT kotak di bawah cuma menambah satu kotak+celah lagi dengan
+ * perbandingan yang sama, bukan mengukur ulang gambarnya).
  *
  * Yang penting dari angka-angka itu bukan nilainya, tapi PERBANDINGANNYA:
  * celah selebar seperlima kotak, dan kotak tidak menempel ke garis badan.
  * Percobaan pertama mengabaikan keduanya (badan 24 px, celah 1 px, kotak
  * mengisi rongga sampai mepet garis) dan hasilnya ketiga kotak melebur jadi
  * satu blok -- jumlahnya tidak bisa dihitung mata, yang menghapus seluruh
- * gunanya. Badan dilebarkan ke 28 px supaya celah 2 px dan jarak 1 px muat.
+ * gunanya. Badan dilebarkan supaya celah 2 px dan jarak 1 px muat.
  *
- * TIGA kotak, bukan empat atau lima, dan itu keputusan soal kejujuran bukan
- * soal ruang. Persen dari tegangan Li-Po hanya bisa dipercaya sampai sekitar
- * +-5..10% (lihat battery.h). Lima kotak berarti tiap kotak bernilai 20% --
- * lebih halus daripada yang benar-benar diketahui, sehingga kotak paling bawah
- * akan berkedip-kedip mengikuti derau, bukan mengikuti daya. Tiga kotak
- * membuat satu langkah bernilai ~33%, nyaman di atas ambang kesalahan itu:
- * setiap perubahan yang terlihat di layar adalah perubahan yang nyata.
+ * EMPAT kotak, satu kotak = 25% persis (BATT_NAIK di bawah), disamakan dengan
+ * touchscreen/touchscreen.ino -- revisi dari versi TIGA kotak sebelumnya, yang
+ * sengaja tidak rata (12/42/84 naik ke 18/48/90) karena persen dari tegangan
+ * Li-Po cuma bisa dipercaya +-5..10% (lihat battery.h) dan kotak terakhir
+ * sengaja dinaikkan ke 90% supaya "penuh" di layar berarti benar-benar hampir
+ * penuh. Pembagian rata di sini melepas jaminan itu -- kotak ke-4 sekarang
+ * menyala persis di 100%, jadi PENUH BENAR-BENAR berarti 100% (bukan
+ * "kira-kira", sengaja, lihat juga pembungkaman ikon mengisi pada 100% di
+ * refresh_cb()) -- tetapi kotak ke-2/3 bisa menyala/padam dalam jarak yang
+ * lebih sempit ke ambang aslinya.
  *
  * Tepi kanan dikunci di x=232 supaya sejajar dengan tepi kanan kartu di
  * bawahnya -- sama seperti angka persen yang digantikannya. */
@@ -506,12 +511,12 @@ static void layar_nyala_sementara(uint32_t ms) {
 #define BATT_NUB_H   7
 
 /* Badan dihitung DARI ISINYA, bukan sebaliknya. Menetapkan lebar badan lebih
- * dulu lalu membagi rongganya bertiga tidak pernah habis dibagi rata, dan sisa
- * satu piksel itu selalu jatuh di salah satu celah sehingga ketiga kotak
- * terlihat tidak sama jaraknya. Dengan arah hitung dibalik, ukuran badan
- * dijamin pas: 3x6 kotak + 2x2 celah + 2x1 jarak + 2x2 garis = 28. */
+ * dulu lalu membagi rongganya rata tidak pernah habis dibagi, dan sisa satu
+ * piksel itu selalu jatuh di salah satu celah sehingga kotak-kotaknya terlihat
+ * tidak sama jaraknya. Dengan arah hitung dibalik, ukuran badan dijamin pas:
+ * 4x6 kotak + 3x2 celah + 2x1 jarak + 2x2 garis = 36. */
 #define BATT_W  (BATT_N_KOTAK * BATT_KOTAK_W + (BATT_N_KOTAK - 1) * BATT_CELAH \
-                 + 2 * BATT_PAD + 2 * BATT_BRD)                       /* 28 */
+                 + 2 * BATT_PAD + 2 * BATT_BRD)                       /* 36 */
 #define BATT_H  (BATT_KOTAK_H + 2 * BATT_PAD + 2 * BATT_BRD)          /* 14 */
 
 /* Posisinya kini per-layar (halaman utama DAN halaman kedua masing-masing
@@ -521,8 +526,10 @@ static void layar_nyala_sementara(uint32_t ms) {
 #define BATT_Y_WAJAH     14                  /* sejajar teks header halaman kedua  */
 /* Halaman utama tidak punya bilah header (lihat build_home()) -- ikon
  * ditempel pojok kiri atas, di pita sempit di atas LING1 (lihat
- * LING1_CX). */
-#define BATT_KANAN_HOME   58
+ * LING1_CX). Digeser 6 px ke kanan (58 -> 64), disamakan dengan
+ * touchscreen/touchscreen.ino, setelah badan melebar ke EMPAT kotak membuatnya
+ * terasa terlalu mepet tepi kiri layar. */
+#define BATT_KANAN_HOME   64
 #define BATT_Y_HOME        2
 
 /* ================= Geometri: halaman utama (home) =================
@@ -1485,12 +1492,21 @@ static void nilai_set(lv_obj_t *lbl, lv_obj_t *satuan, const lv_font_t *fn,
  * ADC. Jaraknya 6%, sedikit di atas riak yang tersisa setelah median + EMA +
  * minimum jendela 3 menit di battery.cpp.
  *
- * Ambangnya juga tidak rata jaraknya. Yang benar-benar perlu dibedakan adalah
- * ujung bawah -- "masih bisa dipakai" versus "cari charger sekarang" -- bukan
- * ujung atas, di mana beda 90% dan 100% tidak mengubah apa pun yang dilakukan
- * pemakai. */
-static const int BATT_TURUN[BATT_N_KOTAK] = { 12, 42, 67 };  /* kotak ke-n padam di bawah ini */
-static const int BATT_NAIK [BATT_N_KOTAK] = { 18, 48, 73 };  /* kotak ke-n menyala di atas ini */
+ * Ambangnya juga tidak rata jaraknya. Ujung bawah membedakan "masih bisa
+ * dipakai" versus "cari charger sekarang". Ujung atas (kotak ke-3, permintaan
+ * langsung) sengaja DINAIKKAN ke 90% -- di bawah itu ikon TIDAK BOLEH terlihat
+ * penuh, supaya "baterai penuh" di layar selalu berarti benar-benar hampir
+ * penuh, bukan "lumayan penuh" pada 73%. */
+/* Rata 25% per kotak, disamakan dengan touchscreen/touchscreen.ino -- lihat
+ * komentar besar di atas definisi BATT_N_KOTAK untuk alasan lengkap.
+ * Histeresis 5% dipertahankan dari versi sebelumnya (gap 6%): sedikit di atas
+ * riak yang tersisa setelah median + EMA + minimum jendela 3 menit di
+ * battery.cpp, supaya kotak yang menggantung tepat di ambang tidak berkedip.
+ * Kotak terakhir menyala TEPAT di 100% -- bukan 95 atau 99 -- karena sekarang
+ * itulah definisi "penuh": lihat pembungkaman ikon mengisi pada persen==100
+ * di refresh_cb(). */
+static const int BATT_TURUN[BATT_N_KOTAK] = { 20, 45, 70, 95  };  /* kotak ke-n padam di bawah ini */
+static const int BATT_NAIK [BATT_N_KOTAK] = { 25, 50, 75, 100 };  /* kotak ke-n menyala di atas ini */
 
 static int batt_hitung_kotak(int persen, int lalu) {
   /* Tampilan pertama belum punya riwayat, jadi histeresis tidak bisa dipakai:
