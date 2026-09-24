@@ -43,7 +43,15 @@
  * sesukanya tanpa mengikis flash. */
 bool aw_titik_ada(void);
 void aw_titik_get(uint8_t *sesi_id_out, uint8_t *index_out);
-void aw_titik_set(const uint8_t *sesi_id, uint8_t index);
+
+/* Epoch lokal (tm_epoch_sekarang() saat ARM_TITIK diterima) tempat titik yang
+ * sedang ter-ARM disimpan, 0 kalau tidak diketahui (mis. jam belum tahu waktu
+ * sama sekali saat ARM_TITIK datang -- lihat aw_jam.cpp). Dipakai HANYA untuk
+ * mendeteksi titik yang basi (jam_titik_basi(), aw_jam.cpp) -- bukan bagian
+ * protokol kawat, murni penanda lokal. */
+uint32_t aw_titik_arm_epoch(void);
+
+void aw_titik_set(const uint8_t *sesi_id, uint8_t index, uint32_t arm_epoch);
 void aw_titik_hapus(void);
 
 /* Harus sama dengan AW_KAPASITAS_BUFFER yang dilaporkan ke aplikasi. */

@@ -74,9 +74,10 @@ typedef struct {
 /* Titik yang ter-ARM (v1.3). Disimpan sebagai blob supaya sesiId dan index
  * tidak pernah bisa terpisah separuh jalan. */
 typedef struct {
-  uint8_t valid;
-  uint8_t index_;
-  uint8_t sesi_id[16];
+  uint8_t  valid;
+  uint8_t  index_;
+  uint8_t  sesi_id[16];
+  uint32_t arm_epoch;   /* tm_epoch_sekarang() saat diterima, 0 = tidak diketahui */
 } titik_t;
 
 static Preferences  s_nvs;
@@ -186,7 +187,14 @@ void aw_store_begin(void) {
 
   /* ARM_TITIK dimuat di sini, dan LUPA MEMUATNYA adalah bug v1.3 yang gejalanya
    * persis kebalikan dari yang dicari: tombol ukur justru mati pada penyalaan di
-   * tengah sesi -- saat ia paling dibutuhkan (dokumen 13.4 & 15). */
+   * tengah sesi -- saat ia paling dibutuhkan (dokumen 13.4 & 15).
+   *
+   * Ukuran titik_t berubah saat arm_epoch ditambahkan (deteksi titik basi,
+   * lihat jam_titik_basi() di aw_jam.cpp) -- blob NVS lama (tanpa field itu)
+   * otomatis GAGAL cek ukuran ini dan jatuh ke memset(0) di bawah, jadi ARM_TITIK
+   * yang sempat nyangkut dari firmware sebelum perubahan ini otomatis terlupakan
+   * sekali saja pada boot pertama sesudah diflash -- efek samping yang
+   * diinginkan, bukan bug. */
   size_t nt = s_nvs.getBytes(K_TITIK, &s_titik, sizeof(s_titik));
   if (nt != sizeof(s_titik)) memset(&s_titik, 0, sizeof(s_titik));
 
@@ -304,16 +312,21 @@ void aw_titik_get(uint8_t *sesi_id_out, uint8_t *index_out) {
   if (index_out)   *index_out = s_titik.index_;
 }
 
-void aw_titik_set(const uint8_t *sesi_id, uint8_t index) {
+uint32_t aw_titik_arm_epoch(void) { return s_titik.arm_epoch; }
+
+void aw_titik_set(const uint8_t *sesi_id, uint8_t index, uint32_t arm_epoch) {
   /* Dibandingkan DULU. Aplikasi boleh mengirim ARM_TITIK berulang -- ACK bisa
    * hilang di udara, dan mengirim ulang lebih murah daripada bertanya -- jadi
    * menulis flash setiap kali berarti mengikisnya untuk perintah yang tidak
-   * mengubah apa pun. */
+   * mengubah apa pun. arm_epoch SENGAJA tidak ikut dibandingkan: ARM_TITIK
+   * ulang dengan isi identik tetap dianggap "titik yang sama", jadi jamnya
+   * lebih baru tidak memaksa penulisan flash tambahan. */
   if (s_titik.valid && s_titik.index_ == index &&
       memcmp(s_titik.sesi_id, sesi_id, 16) == 0) return;
 
-  s_titik.valid  = 1;
-  s_titik.index_ = index;
+  s_titik.valid     = 1;
+  s_titik.index_    = index;
+  s_titik.arm_epoch = arm_epoch;
   memcpy(s_titik.sesi_id, sesi_id, 16);
   if (s_nvs_ok && s_nvs.putBytes(K_TITIK, &s_titik, sizeof(s_titik)) != sizeof(s_titik))
     Serial.println("[store] GAGAL menulis ARM_TITIK -- tombol ukur tidak akan "

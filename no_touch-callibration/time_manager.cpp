@@ -183,6 +183,12 @@ bool tm_valid(void) {
   return s_src != TIME_SRC_NONE;
 }
 
+uint32_t tm_epoch_sekarang(void) {
+  if (s_src == TIME_SRC_NONE) return 0;
+  time_t now = s_base_epoch + (time_t)((uint32_t)(millis() - s_base_ms) / 1000UL);
+  return (uint32_t)now;
+}
+
 time_src_t tm_source(void) {
   return s_src;
 }

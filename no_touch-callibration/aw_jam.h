@@ -85,6 +85,20 @@ bool jam_cek_manual_boleh(void);
  * pengukuran untuk mengatakan terus terang bahwa angka ini tidak dikirim. */
 bool jam_ukur_lokal(void);
 
+/* Lupakan titik ter-ARM (RAM dan NVS) TANPA syarat kecocokan sesi -- kebalikan
+ * disengaja dari dokumen 12 poin 5 (yang merancang ARM_TITIK supaya selamat
+ * lintas MATI-nya DAYA). Dua pemanggil: perintah konsol serial "lupa" (aksi
+ * manual pengguna) dan jam_titik_cek_basi() internal (otomatis, titik yang
+ * sudah berjam-jam nganggur -- lihat aw_jam.cpp). `sebab` masuk ke log
+ * Serial apa adanya, murni diagnostik. Tidak berpengaruh apa-apa kalau tidak
+ * ada titik yang ter-ARM.
+ *
+ * BUKAN dipicu dari alasan reset (RST vs power-on) -- sudah dicoba dan
+ * dibuang: board ini melaporkan KEDUANYA sebagai ESP_RST_POWERON, chip tidak
+ * bisa membedakan pin EN ditoggle dari daya baru masuk, jadi tidak ada sinyal
+ * hardware yang bisa dipakai untuk itu di sini. */
+void jam_titik_lupakan_paksa(const char *sebab);
+
 /* ---- Pembaca untuk UI. Semuanya murni RAM dan murah. ---- */
 uint8_t  jam_status(void);             /* aw_sesi_t: 0 IDLE, 1 ARMED, 2 RUNNING */
 bool     jam_sedang_mengukur(void);

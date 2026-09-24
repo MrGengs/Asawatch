@@ -313,6 +313,7 @@ static uint32_t layar_mati_pada = 0;   /* 0 = tanpa batas waktu */
 static struct { uint32_t ms; const char *tag; char rinci[40]; } s_jejak[JEJAK_N];
 static uint32_t s_jejak_total = 0, s_jejak_dicetak = 0;
 static const char *s_reset_sebab = "?";
+static esp_reset_reason_t s_reset_alasan = ESP_RST_UNKNOWN;   /* lihat setup(), dekat jam_mulai() */
 
 static void jejak(const char *tag, const char *rinci = "") {
   auto &e = s_jejak[s_jejak_total % JEJAK_N];
@@ -2614,6 +2615,9 @@ static void boot_aktifkan(void) {
  *   now          UKUR_SEKARANG
  *   tombol       tekan tombol fisik (bukan BLE -- menguji jalur tombol)
  *   status       cetak keadaan jam
+ *   lupa         lupakan titik ter-ARM paksa (BUKAN opcode protokol -- jalan
+ *                pintas lokal untuk titik yang nyangkut, mis. sisa `titik N`
+ *                di atas; lihat jam_titik_lupakan_paksa() di aw_jam.h)
  *
  * Satu sesi utuh tanpa HP:
  *   arm -> ukur 0 -> tombol -> titik 2 -> tombol -> titik 3 -> tombol
@@ -2758,6 +2762,14 @@ static void konsol_jalankan(char *baris) {
   else if (!strcmp(baris, "ukur"))  konsol_kirim(AW_OP_UKUR, true, true, (uint8_t)arg);
   else if (!strcmp(baris, "titik")) konsol_kirim(AW_OP_ARM_TITIK, true, true, (uint8_t)arg);
   else if (!strcmp(baris, "now"))   konsol_kirim(AW_OP_UKUR_SEKARANG, false, false, 0);
+  else if (!strcmp(baris, "lupa")) {
+    /* Bukan opcode protokol -- fitur lokal murni, jalan pintas untuk titik
+     * ter-ARM yang nyangkut (mis. sisa pengujian `titik N` di atas) tanpa
+     * perlu urutan arm+batal. Lihat komentar jam_titik_lupakan_paksa() di
+     * aw_jam.h untuk kenapa ini TIDAK dipicu otomatis dari tombol RST. */
+    Serial.println("[konsol] melupakan titik ter-ARM secara paksa");
+    jam_titik_lupakan_paksa("perintah konsol \"lupa\"");
+  }
   else if (!strcmp(baris, "tombol")) {
     /* Jalur tombol fisik, sengaja BUKAN lewat antrean: yang diuji di sini justru
      * dispatcher satu-tombol-dua-makna, yang tidak punya opcode. */
@@ -2884,7 +2896,8 @@ void setup() {
    * tiga detiknya sama sekali. */
   bool nyala_disengaja = pwr_gerbang_nyala();
 
-  s_reset_sebab = reset_nama(esp_reset_reason());
+  s_reset_alasan = esp_reset_reason();
+  s_reset_sebab  = reset_nama(s_reset_alasan);
 
   /* Bukti PASTI bahwa boot ini dicatu USB, bukan tebakan tegangan. Di baterai,
    * board hanya bisa menyala kalau tombol PWR DITEKAN (tombol itulah yang
@@ -2894,9 +2907,9 @@ void setup() {
    * dihitung: reset lunak, panic, watchdog, dan reset lewat USB/RTS bisa terjadi
    * saat jam jalan di baterai, jadi tidak membuktikan apa-apa. */
   {
-    const esp_reset_reason_t r = esp_reset_reason();
-    const bool daya_baru = (r == ESP_RST_POWERON || r == ESP_RST_BROWNOUT ||
-                            r == ESP_RST_PWR_GLITCH);
+    const bool daya_baru = (s_reset_alasan == ESP_RST_POWERON ||
+                            s_reset_alasan == ESP_RST_BROWNOUT ||
+                            s_reset_alasan == ESP_RST_PWR_GLITCH);
     if (!nyala_disengaja || (!kunci_ditekan_awal && daya_baru)) {
       s_boot_usb = true;
       battery_usb_pasti();
@@ -3043,6 +3056,25 @@ void setup() {
    * (NVS -> boot_id naik -> muat ring -> sesi dipaksa IDLE -> BLE -> event
    * BOOT); lihat aw_jam.cpp. */
   jam_mulai();
+
+  /* Sempat dicoba: melupakan titik ter-ARM otomatis saat boot terdeteksi
+   * berasal dari tombol RST (bukan siklus daya), atas permintaan eksplisit
+   * supaya RST yang tidak sengaja tertekan tidak meninggalkan jam dalam
+   * keadaan "menunggu diukur" yang membingungkan. DIBUANG setelah diukur di
+   * board sungguhan: baris "[jejak] alasan reset" menunjukkan tombol RST
+   * board ini dilaporkan esp_reset_reason() sebagai ESP_RST_POWERON --
+   * PERSIS SAMA dengan siklus daya baterai yang sungguhan (dokumentasi
+   * ESP-IDF menyebut beberapa chip Espressif memang menyamakan pin EN
+   * ditoggle dengan daya baru masuk di level hardware; sekarang terbukti
+   * berlaku juga di sini). Chip ini TIDAK PUNYA sinyal apa pun -- baik
+   * esp_reset_reason() maupun RTC memory, yang ikut kehapus oleh reset yang
+   * sama -- yang bisa membedakan "RST ditekan" dari "baterai baru dipasang",
+   * jadi jangan dicoba lagi lewat jalur ini.
+   *
+   * Diganti dua mekanisme yang tidak bergantung pada alasan reset sama
+   * sekali: perintah konsol serial "lupa" (aksi manual, lihat konsol_jalankan())
+   * dan jam_titik_cek_basi() otomatis di dalam jam_putar() (titik yang sudah
+   * berjam-jam nganggur, pakai jam DINDING dari RTC -- lihat aw_jam.cpp). */
 
   /* Koreksi halaman: splash_tutup() sudah memuat scr_home lebih dulu karena
    * urutan init ini WAJIB splash sebelum jam_mulai() (dokumen 13.4), jadi ia

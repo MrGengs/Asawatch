@@ -38,6 +38,13 @@ bool tm_now(struct tm *out);
 /* true kalau tm_now() bisa dipercaya. */
 bool tm_valid(void);
 
+/* Epoch lokal sekarang (detik sejak 1970 UTC, sudah digeser zona waktu, sama
+ * seperti yang dipakai tm_now()), 0 kalau tm_valid() false. BEDA dari
+ * aw_uptime_s(): ini jam DINDING yang tahan reboot (RTC/NTP/anchor HP), bukan
+ * uptime yang nol ulang tiap boot -- dipakai untuk cap waktu yang perlu
+ * dibandingkan LINTAS boot, mis. mendeteksi ARM_TITIK basi (aw_store.cpp). */
+uint32_t tm_epoch_sekarang(void);
+
 /* Asal waktu yang sedang dipakai. */
 time_src_t tm_source(void);
 

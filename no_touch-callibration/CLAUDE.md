@@ -212,6 +212,14 @@ id <1-99>    atur label uji manual (bukan protokol) — nama BLE jadi
              (unit dari batch produksi yang sama — TERBUKTI terjadi pada
              batch 10 unit pengujian, bukan cuma teori: bahkan suffix
              6-hex/3-byte pun masih bisa bertabrakan).
+lupa         lupakan titik ter-ARM paksa (bukan protokol) — jalan pintas
+             untuk titik yang nyangkut (mis. sisa `titik N` di atas) tanpa
+             perlu urutan `arm`+`batal`. Titik ter-ARM juga dilupakan
+             OTOMATIS kalau sudah >6 jam nganggur (jam_titik_cek_basi(),
+             aw_jam.cpp) — RST TIDAK memicu ini: board ini melaporkan
+             ESP_RST_POWERON untuk tombol RST, sama persis dengan siklus
+             daya baterai sungguhan, jadi tidak ada sinyal hardware yang
+             bisa membedakan keduanya (sudah dicoba & dibuang).
 ```
 
 Satu sesi utuh: `arm` → `ukur 0` → `tombol` → `titik 2` → `tombol` →

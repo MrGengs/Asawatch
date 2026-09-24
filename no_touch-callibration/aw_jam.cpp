@@ -247,6 +247,10 @@ static const uint8_t SESI_NOL[16] = { 0 };
  * mendapat prototipe otomatis seperti .ino. */
 static void jam_catat_ack(void);
 
+/* Sama alasannya: definisinya di dekat jam_titik_lupakan_paksa() (dekat
+ * pembaca UI, jauh di bawah), tapi jam_putar() memanggilnya lebih dulu. */
+static void jam_titik_cek_basi(void);
+
 /* ================= Utilitas ================= */
 static bool baterai_kritis(void) {
   return battery_valid() && battery_percent() < AW_BATERAI_KRITIS_PCT;
@@ -1018,7 +1022,10 @@ static void jalankan_perintah(const aw_perintah_t *p) {
       memcpy(s_titik_sesi, arg, 16);
       s_titik_index = arg[16];
       s_titik_ada   = true;
-      aw_titik_set(s_titik_sesi, s_titik_index);
+      /* tm_epoch_sekarang() bisa saja 0 (jam belum tahu waktu sama sekali) --
+       * jam_titik_basi() memperlakukan 0 sebagai "tidak diketahui, jangan
+       * pernah dianggap basi", bukan "epoch 1970". */
+      aw_titik_set(s_titik_sesi, s_titik_index, tm_epoch_sekarang());
       ack(op);
       kirim_status();
       Serial.printf("[titik] ARM_TITIK index %u -- tombol ukur menyala, tersimpan di NVS\n",
@@ -1276,6 +1283,7 @@ void jam_putar(void) {
   putar_perintah_ble();      /* ambil dari antrean, jalankan opcode */
   putar_sesi();              /* timeout ARM, jadwal index 2 dan 3   */
   ukur_putar();              /* panen metrik, padamkan LED bila cukup */
+  jam_titik_cek_basi();      /* lupakan ARM_TITIK yang sudah berjam-jam nganggur */
 
   /* Denyut Status selama mengukur (dokumen 8, v1.4). Dipanggil tiap putaran;
    * kadensinya yang menahan, bukan pemanggilnya -- supaya tidak ada satu pun
@@ -1381,6 +1389,44 @@ bool     jam_ada_anchor(void)        { return aw_anchor_boot_ini(); }
 
 bool     jam_titik_armed(void)       { return s_titik_ada; }
 uint8_t  jam_titik_index(void)       { return s_titik_index; }
+
+/* Titik ter-ARM dianggap basi (kemungkinan besar sisa pengujian, atau sesi
+ * yang ditinggalkan aplikasinya dan BATAL_SESI-nya tidak pernah sampai) kalau
+ * sudah lebih dari sekian jam sejak ARM_TITIK diterima -- jaring pengaman
+ * untuk kasus yang tidak dibayangkan dokumen 12 poin 5: bukan "daya sempat
+ * putus di tengah sesi ~2 jam", melainkan tombol ukur yang menyala BERHARI-HARI
+ * karena tidak ada yang pernah kembali membatalkannya. Sesi asli v1.3
+ * berdurasi "lebih dari dua jam" (titik terakhir, index 3, jatuh tempo 2 jam
+ * sesudah makan) -- 6 jam memberi jarak aman ~4 jam untuk pengguna yang telat
+ * menekan tombolnya, tanpa membiarkan status "menunggu diukur" menggantung
+ * lintas hari. */
+#define TITIK_BASI_S (6UL * 3600UL)
+
+static void jam_titik_cek_basi(void) {
+  if (!s_titik_ada || !tm_valid()) return;
+  /* 0 berarti epoch tidak diketahui saat ARM_TITIK diterima (jam belum
+   * pernah dapat waktu sama sekali) -- tidak ada dasar untuk menghitung
+   * durasinya, jadi tidak pernah dianggap basi lewat jalur ini. */
+  uint32_t arm_epoch = aw_titik_arm_epoch();
+  if (arm_epoch == 0) return;
+  uint32_t sekarang = tm_epoch_sekarang();
+  if (sekarang < arm_epoch) return;    /* jam baru disetel mundur -- abaikan, jangan underflow */
+  if (sekarang - arm_epoch >= TITIK_BASI_S) {
+    char sebab[48];
+    snprintf(sebab, sizeof(sebab), "basi (%lu jam)",
+             (unsigned long)((sekarang - arm_epoch) / 3600UL));
+    jam_titik_lupakan_paksa(sebab);
+  }
+}
+
+void jam_titik_lupakan_paksa(const char *sebab) {
+  if (!s_titik_ada) return;
+  Serial.printf("[titik] dilupakan paksa (%s) -- index %u dipadamkan, "
+                "sambungkan aplikasi lagi untuk mengARM ulang\n",
+                sebab, (unsigned)s_titik_index);
+  s_titik_ada = false;
+  aw_titik_hapus();
+}
 
 uint8_t  jam_ukur_index(void)        { return s_ukur_index; }  /* lebar byte penuh sejak v1.3 */
 uint16_t jam_ukur_detak(void)        { return s_ukur_detak; }
