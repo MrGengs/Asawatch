@@ -1255,8 +1255,12 @@ void jam_mulai(void) {
    * pertama tanpa aplikasi mengirim apa pun (dokumen 13.4). Melewatkan ini
    * menghasilkan bug yang gejalanya kebalikan dari yang dicari: tombol mati
    * justru saat ia paling dibutuhkan. */
-  s_titik_ada = aw_titik_ada();
-  if (s_titik_ada) aw_titik_get(s_titik_sesi, &s_titik_index);
+  /* Varian kalibrasi: setiap boot MELUPAKAN titik ter-ARM. Board ini tidak bisa
+   * membedakan RST dari cabut daya (keduanya ESP_RST_POWERON), dan titik yang
+   * selamat lintas boot membuat layar langsung masuk "Tekan Ukur N" tanpa
+   * aplikasi. Aplikasi meng-ARM ulang begitu tersambung. */
+  s_titik_ada = false;
+  aw_titik_hapus();
 
   /* Reboot mengembalikan jam ke IDLE, dan sampel lama tetap di buffer dengan
    * boot_id lamanya. Sejak v1.3 ini KEADAAN NORMAL YANG DIHARAPKAN, bukan sesi

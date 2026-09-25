@@ -1980,9 +1980,34 @@ static void halaman_set(bool wajah) {
   lv_scr_load(wajah ? scr_wajah : scr_home);
 }
 
+/* Begitu pengukuran selesai, hasil ditahan HALAMAN_PULANG_MS lalu jam pulang ke
+ * halaman utama MESKIPUN sesi belum IDLE atau titik masih ter-ARM. Tanpa ini
+ * kedua kondisi itu (level-based) menahan halaman ukur tanpa batas. Penahanan
+ * dilepas bila pengukuran baru dimulai atau keadaan sesi/titik berubah lagi. */
+static bool     s_tahan_selesai = false;
+static uint32_t s_sig_tahan = 0;
+
+static uint32_t halaman_sig(void) {
+  bool tb = jam_titik_armed();
+  return (uint32_t)jam_status() | (tb ? 0x100u : 0u) |
+         (tb ? ((uint32_t)jam_titik_index() << 9) : 0u);
+}
+
 static void halaman_evaluasi(void) {
-  bool perlu_wajah = jam_status() != AW_SESI_IDLE || jam_titik_armed() ||
-                     jam_sedang_mengukur();
+  static bool mengukur_lalu = false;
+  bool mengukur = jam_sedang_mengukur();
+  if (mengukur) {
+    s_tahan_selesai = false;
+  } else if (mengukur_lalu) {
+    s_tahan_selesai = true;
+    s_sig_tahan = halaman_sig();
+  } else if (s_tahan_selesai && halaman_sig() != s_sig_tahan) {
+    s_tahan_selesai = false;
+  }
+  mengukur_lalu = mengukur;
+
+  bool perlu_wajah = mengukur ||
+      (!s_tahan_selesai && (jam_status() != AW_SESI_IDLE || jam_titik_armed()));
 
   if (perlu_wajah) {
     halaman_set(true);
@@ -2179,8 +2204,11 @@ static void refresh_cb(lv_timer_t *tm) {
    * berjalan. Kalau ditunda, layarnya tetap mati beberapa detik setelah selesai
    * dan tidak menyala semalaman. */
   if (layar_mati_pada && (int32_t)(millis() - layar_mati_pada) >= 0) {
-    if (jam_sedang_mengukur()) layar_mati_pada = millis() + 5000UL;
-    else                       layar_set(false);   /* ini mengosongkan tenggatnya */
+    /* Selama halaman ukur masih tampil (mengukur atau menahan hasil 5 detik),
+     * layar tidak boleh mati; ia baru mati ~2 dtk setelah kembali ke halaman
+     * utama. */
+    if (jam_sedang_mengukur() || s_di_wajah) layar_mati_pada = millis() + 2000UL;
+    else                                     layar_set(false);   /* ini mengosongkan tenggatnya */
   }
 
   /* Tenggat sembunyi indikator nomor unit -- lihat pemasangannya di setup(). */
