@@ -85,6 +85,12 @@ static const char *s_sebab = "-";      /* aturan yang terakhir menyalakan s_char
 #define CV_PLATEAU_MV  6              /* naik < ini per 3 mnt di >= BATT_CV_PLATEAU_MIN_MV = CV */
 static int      s_percent_init = 0;
 static int      s_tersimpan    = 0;   /* persen tersimpan di NVS dari sesi sebelumnya (0 = tidak ada) */
+/* Boot membaca tegangan JAUH di atas persen tersimpan. Sel tidak bisa terisi
+ * saat jam mati, jadi satu-satunya penjelasan adalah tegangan pin yang bukan
+ * milik sel: sel yang habis diputus sirkuit proteksinya dan pin membaca
+ * tegangan charger (~4,2 V), persis seperti sel penuh. Selama ini true, naiknya
+ * persen dipelankan seperti fase CC dan tidak boleh melompat lewat cabang CV. */
+static bool     s_curiga_naik  = false;
 static uint32_t s_pct_ms       = 0;   /* langkah persen terakhir                */
 static uint32_t s_cv_ms        = 0;   /* akumulasi waktu di fase CV             */
 static uint32_t s_upd_ms       = 0;   /* pemanggilan battery_update sebelumnya  */
@@ -624,6 +630,7 @@ void battery_update(void) {
     s_cv_ms  = 0;
     s_pct_ms = now;
   } else if (was_charging && !s_charging) {
+    s_curiga_naik = false;
     s_pl_hist = 0; s_bk_hist = 0; s_pl_n = 0; s_prev_ms = 0;
     s_ir_ms = 0;
     kosongkan_jendela();
@@ -644,6 +651,10 @@ void battery_update(void) {
      * berjam-jam penghalusan. Di luar rentang itu sel jelas berubah selama mati
      * (dicas atau terkuras) dan tegangan yang dipercaya. */
     if (s_tersimpan > 0 && abs(v - s_tersimpan) <= PCT_LANJUT_PCT) s_percent = s_tersimpan;
+    else if (s_tersimpan > 0 && v > s_tersimpan + PCT_LANJUT_PCT) {
+      s_percent = s_tersimpan;
+      s_curiga_naik = true;
+    }
     else                                                           s_percent = v;
     s_percent_init = 1;
     s_pct_ms       = now;
@@ -695,8 +706,9 @@ void battery_update(void) {
      * Turun: selalu pelan (PCT_TURUN_MS) -- baik cv atau tidak, penurunan di
      * sini cuma bisa berarti derau atau charger yang diam-diam berhenti,
      * bukan sesuatu yang harus langsung dipercaya. */
+    if (s_curiga_naik && s_percent >= target) s_curiga_naik = false;
     if (target >= s_percent) {
-      if (cv) s_percent = target;
+      if (cv && !s_curiga_naik) s_percent = target;
       else    geser_persen(target, 60000UL / BATT_CHG_MAX_PCT_MIN, false);
     } else {
       geser_persen(target, PCT_TURUN_MS, true);
@@ -708,6 +720,7 @@ void battery_update(void) {
      * hanya boleh dianggap getaran ambang. */
     const int target = mv_to_percent(basis);
     if (target < s_percent)                      geser_persen(target, PCT_TURUN_MS, true);
+    else if (s_curiga_naik)                      { /* di baterai tidak mungkin naik */ }
     else if (target >= s_percent + PCT_NAIK_MIN) geser_persen(target, PCT_NAIK_MS, false);
   }
 
