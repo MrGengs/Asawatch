@@ -82,9 +82,19 @@ static const char *s_sebab = "-";      /* aturan yang terakhir menyalakan s_char
 #define PCT_NAIK_MS    15000UL        /* baterai: 1% naik per 15 s              */
 #define PCT_NAIK_MIN   3              /* baterai: naik hanya kalau selisih >= ini */
 #define PCT_LANJUT_PCT 12             /* boot: lanjut dari nilai tersimpan kalau selisih <= ini */
+#define CV_LOMPAT_MAKS_PCT 10         /* selisih terbesar yang boleh dilompati cabang CV     */
 #define CV_PLATEAU_MV  6              /* naik < ini per 3 mnt di >= BATT_CV_PLATEAU_MIN_MV = CV */
 static int      s_percent_init = 0;
 static int      s_tersimpan    = 0;   /* persen tersimpan di NVS dari sesi sebelumnya (0 = tidak ada) */
+/* Tegangan pin saat mengisi TIDAK dipercaya sebagai tegangan sel: naiknya
+ * persen dipelankan seperti fase CC dan tidak boleh melompat lewat cabang CV.
+ * Menyala kalau (a) boot membaca tegangan jauh di atas persen tersimpan (sel
+ * tidak bisa terisi saat jam mati), atau (b) saat dicolok, pin melonjak jauh
+ * melebihi lonjakan wajar arus x hambatan (BATT_CHG_LONJAK_CURIGA_MV) -- tanda
+ * pin membaca rel/tegangan charger, bukan sel: jam lalu tampak "penuh" saat
+ * dicas dan jatuh ke 2 kotak begitu kabel dicabut. */
+static bool     s_curiga_naik  = false;
+#define BATT_CHG_LONJAK_CURIGA_MV 250
 static uint32_t s_pct_ms       = 0;   /* langkah persen terakhir                */
 static uint32_t s_cv_ms        = 0;   /* akumulasi waktu di fase CV             */
 static uint32_t s_upd_ms       = 0;   /* pemanggilan battery_update sebelumnya  */
@@ -626,10 +636,12 @@ void battery_update(void) {
     s_chg_ir_mv = BATT_CHG_IR_MV;
     s_ir_ms     = step_pra_mv ? now : 0;
     s_ir_pre_mv = step_pra_mv;
+    s_curiga_naik = step_pra_mv != 0;   /* sementara; diputuskan 10 dtk kemudian */
     kosongkan_jendela();
     s_cv_ms  = 0;
     s_pct_ms = now;
   } else if (was_charging && !s_charging) {
+    s_curiga_naik = false;
     s_pl_hist = 0; s_bk_hist = 0; s_pl_n = 0; s_prev_ms = 0;
     s_ir_ms = 0;
     kosongkan_jendela();
@@ -650,6 +662,10 @@ void battery_update(void) {
      * berjam-jam penghalusan. Di luar rentang itu sel jelas berubah selama mati
      * (dicas atau terkuras) dan tegangan yang dipercaya. */
     if (s_tersimpan > 0 && abs(v - s_tersimpan) <= PCT_LANJUT_PCT) s_percent = s_tersimpan;
+    else if (s_tersimpan > 0 && v > s_tersimpan + PCT_LANJUT_PCT) {
+      s_percent = s_tersimpan;
+      s_curiga_naik = true;
+    }
     else                                                           s_percent = v;
     s_percent_init = 1;
     s_pct_ms       = now;
@@ -664,6 +680,7 @@ void battery_update(void) {
       naik = s_wmin[(s_wmin_i + WMIN_SLOTS - 1) % WMIN_SLOTS] - s_wmin[s_wmin_i];
     if (s_ir_ms && (uint32_t)(now - s_ir_ms) >= 10000UL) {
       int ir = s_batt_mv - s_ir_pre_mv;
+      s_curiga_naik = ir > BATT_CHG_LONJAK_CURIGA_MV;
       s_chg_ir_mv = ir < 50 ? 50 : (ir > 150 ? 150 : ir);   /* langkah terdeteksi >= 50 */
       s_ir_ms = 0;
     }
@@ -705,8 +722,14 @@ void battery_update(void) {
      * Turun: selalu pelan (PCT_TURUN_MS) -- baik cv atau tidak, penurunan di
      * sini cuma bisa berarti derau atau charger yang diam-diam berhenti,
      * bukan sesuatu yang harus langsung dipercaya. */
+    if (s_curiga_naik && s_percent >= target) s_curiga_naik = false;
     if (target >= s_percent) {
-      if (cv) s_percent = target;
+      /* Lompat seketika HANYA kalau angka yang tampil sudah dekat. Log nyata:
+       * sel ~3,8 V, dicolok, pin langsung 4,20 V datar (tegangan charger, bukan
+       * sel) dan deteksi colok sempat ON/OFF/ON dalam 7 detik sehingga pengaman
+       * berbasis riwayat colok terlewat. Selisih jauh berarti tegangan itu tidak
+       * bisa dipercaya: naiknya dipelankan seperti fase CC. */
+      if (cv && !s_curiga_naik && target - s_percent <= CV_LOMPAT_MAKS_PCT) s_percent = target;
       else    geser_persen(target, 60000UL / BATT_CHG_MAX_PCT_MIN, false);
     } else {
       geser_persen(target, PCT_TURUN_MS, true);
@@ -718,6 +741,7 @@ void battery_update(void) {
      * hanya boleh dianggap getaran ambang. */
     const int target = mv_to_percent(basis);
     if (target < s_percent)                      geser_persen(target, PCT_TURUN_MS, true);
+    else if (s_curiga_naik || target - s_percent > 15) { /* di baterai tidak mungkin naik jauh */ }
     else if (target >= s_percent + PCT_NAIK_MIN) geser_persen(target, PCT_NAIK_MS, false);
   }
 
