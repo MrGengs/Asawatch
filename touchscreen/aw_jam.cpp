@@ -323,7 +323,8 @@ static void kirim_status(void) {
   b[3] = (uint8_t)((s_ukur_aktif        ? AW_ST_SEDANG_MENGUKUR     : 0) |
                    (aw_kalibrasi_ada()  ? AW_ST_KALIBRASI_TERSIMPAN : 0) |
                    (baterai_kritis()    ? AW_ST_BATERAI_KRITIS      : 0) |
-                   (aw_anchor_boot_ini() ? AW_ST_ADA_ANCHOR         : 0));
+                   (aw_anchor_boot_ini() ? AW_ST_ADA_ANCHOR         : 0) |
+                   (battery_charging()  ? AW_ST_SEDANG_DICAS        : 0));
   aw_tulis_u32(&b[4], aw_uptime_s());
 
   /* Kemajuan pengukuran (dokumen 8, v1.4). Nol saat tidak mengukur -- kedua
@@ -1341,6 +1342,16 @@ void jam_putar(void) {
       aw_ble_set_baterai((uint8_t)bp);
       kirim_status();
     }
+  }
+
+  /* Colok/cabut kabel belum tentu menggeser persen, jadi bit4 Status punya
+   * pemicunya sendiri -- tanpa ini aplikasi baru tahu jam dicas saat persennya
+   * kebetulan naik satu. */
+  static int cas_terakhir = -1;
+  const int cas = battery_charging() ? 1 : 0;
+  if (cas != cas_terakhir) {
+    cas_terakhir = cas;
+    kirim_status();
   }
 }
 

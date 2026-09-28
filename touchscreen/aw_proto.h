@@ -18,7 +18,7 @@
 
 /* ---------------- Versi ---------------- */
 #define AW_VERSI_MAYOR      1
-#define AW_VERSI_MINOR      4
+#define AW_VERSI_MINOR      5
 /* Dinaikkan manual tiap kali firmware dirilis. Aplikasi hanya melaporkannya,
  * tidak mengambil keputusan apa pun darinya. */
 #define AW_FIRMWARE_BUILD   1
@@ -126,6 +126,10 @@ typedef enum {
 #define AW_ST_KALIBRASI_TERSIMPAN  0x02
 #define AW_ST_BATERAI_KRITIS       0x04
 #define AW_ST_ADA_ANCHOR           0x08
+/* bit4 (v1.5): keadaan sebenarnya dari battery_charging(), TANPA pembungkaman
+ * "sudah 100%" yang dipakai layar jam. Aplikasi yang membungkamnya sendiri,
+ * supaya keputusan tampilan tidak menghapus informasi dari kawat. */
+#define AW_ST_SEDANG_DICAS         0x10
 
 /* ---------------- Status sesi (dokumen 12) ---------------- */
 typedef enum {

@@ -738,13 +738,19 @@ static void balas(uint8_t jenis, uint8_t payload) {   // jenis = 0x05 ACK atau 0
 | 0 | 1 | `status_sesi`: 0 idle, 1 armed, 2 running |
 | 1 | 1 | `sampel_tertunda` — jumlah entri belum di-ack di buffer |
 | 2 | 1 | `baterai` % |
-| 3 | 1 | `flag`: bit0 sedang mengukur, bit1 kalibrasi tersimpan, bit2 baterai kritis, bit3 boot ini sudah punya anchor |
+| 3 | 1 | `flag`: bit0 sedang mengukur, bit1 kalibrasi tersimpan, bit2 baterai kritis, bit3 boot ini sudah punya anchor, bit4 sedang dicas *(v1.5)* |
 | 4 | 4 | `uptime_s` uint32 LE |
 | 8 | 1 | `ukur_persen` 0..100 — kemajuan pengukuran, 0 bila tidak mengukur *(v1.4)* |
 | 9 | 1 | `ukur_sisa_detik` — perkiraan sisa, **jenuh di 255**, 0 bila tidak mengukur *(v1.4)* |
 
 Dikirim sebagai notifikasi setiap kali salah satu isinya berubah (ARM, tombol, mulai/selesai ukur,
 anchor tersimpan, kalibrasi tersimpan, kembali ke IDLE), dan disegarkan juga saat dibaca.
+
+**bit4 sedang dicas (v1.5)** diisi langsung dari `battery_charging()` — keadaan sebenarnya, **tanpa**
+pembungkaman "sudah 100%" yang dipakai ikon petir di layar jam (`refresh_cb`). Aplikasi yang
+menerapkan aturan 100% itu sendiri, supaya keputusan tampilan tidak menghapus informasi dari kawat.
+Karena colok/cabut belum tentu menggeser persen, `jam_loop()` punya pemicu `kirim_status()`
+sendiri untuk bit ini (`cas_terakhir`).
 
 ### 8.1 Denyut selama mengukur (v1.4)
 
