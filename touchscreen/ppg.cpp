@@ -238,11 +238,32 @@ static bool  readingsStable = false;
 static const double SLOW_ALPHA = 0.97;
 static double acIRSmoothPrev = 0;
 static double slowAC = 0;
+/* true = slowAC belum diseed dari sampel nyata sejak reset terakhir -- lihat
+ * pemakaiannya di detect_beat(). Beda dari dcInit (ppg.cpp bagian atas): itu
+ * milik filter DC per-kanal (irVal/redVal mentah), ini milik EMA kedua di
+ * DALAM detect_beat yang memisahkan cardiac dari napas/perfusi. Keduanya
+ * direset pada momen yang sama (kontak berganti / AGC berubah) tapi
+ * sebelumnya cuma yang pertama yang di-guard settle-nya (DC_SETTLE_MS) --
+ * yang kedua diam-diam mulai dari 0 dan butuh ~2,6 detik (1/(1-0,97) sampel
+ * pada 12,5 Hz) sendiri untuk konvergen. Diport dari no_touch-callibration/
+ * (2026-09-28, dibuktikan lewat wear-test di board itu, arsitekturnya
+ * board-independen jadi berlaku sama di sini). */
+static bool   slowInit = false;
 static double cardiacPrev = 0;
 static double peakEnvelope = 100;
 static unsigned long lastBeatMs = 0;
 static const unsigned long MIN_IBI_MS = 300;   /* refractory -> maks 200 bpm */
-static double ibiHistory[4] = { 600, 600, 600, 600 };
+/* Lebar rata-rata bergulir BPM. NAIK dari 4 ke 8 (diport dari
+ * no_touch-callibration/, 2026-09-28): dengan 4 detak, satu window melompat
+ * 57.6 -> 85.4 -> 93.5 -> 107.0 -> 69.5 bpm dalam ~15 detik diam -- ayunan
+ * fisiologis tidak masuk akal sebesar itu, itu derau dari window yang
+ * terlalu pendek (satu detak yang sedikit meleset langsung menggeser
+ * rata-rata 1/4-nya). HP pembanding jelas memakai window lebih panjang.
+ * Konsekuensinya BPM di layar bereaksi lebih lambat ke perubahan laju asli
+ * (mis. abis gerak) -- itu memang pertukaran yang diambil sengaja demi angka
+ * yang stabil dibandingkan dengan alat lain, bukan gratis. */
+static const int IBI_HISTORY_N = 8;
+static double ibiHistory[IBI_HISTORY_N] = { 600, 600, 600, 600, 600, 600, 600, 600 };
 static byte   ibiIndex = 0;
 static float  currentBPM = 0;
 static bool   bpmValid = false;
@@ -338,10 +359,11 @@ static void capture_hold(void);
 static void reset_beat_detector(void) {
   acIRSmoothPrev = 0;
   slowAC = 0;
+  slowInit = false;
   cardiacPrev = 0;
   peakEnvelope = 100;
   lastBeatMs = 0;
-  for (int i = 0; i < 4; i++) ibiHistory[i] = 600;
+  for (int i = 0; i < IBI_HISTORY_N; i++) ibiHistory[i] = 600;
   ibiIndex = 0;
   currentBPM = 0;
   bpmValid = false;
@@ -367,6 +389,22 @@ static void reset_session_stats(void) {
 }
 
 static void detect_beat(double acIR) {
+  if (!slowInit) {
+    /* Seed dari sampel nyata pertama, sama seperti dcInit di process_sample --
+     * tanpa ini slowAC mulai dari 0 dan acIRSmooth awal (besarnya sembarang,
+     * tergantung fase napas/perfusi saat gerbang settle terbuka) langsung
+     * jadi "cardiac" penuh selama slowAC mengejar ~2,6 detik (1/(1-0,97)
+     * sampel @ 12,5 Hz). Transien itu sendiri yang meracuni peakEnvelope
+     * (lihat catatan di deklarasi slowInit) -- dibuktikan lewat log
+     * [ppg-wave] di no_touch-callibration/ (2026-09-27): cardiac sempat
+     * -1145 lalu -5418 pada sesi nyata, padahal amplitudo denyut asli jauh
+     * lebih kecil (puluhan-ratusan, bukan ribuan). acIRSmoothPrev ikut
+     * diseed karena acIRSmooth di bawah memakainya pada baris yang sama. */
+    acIRSmoothPrev = acIR;
+    slowAC = acIR;
+    slowInit = true;
+  }
+
   /* Smoothing ringan supaya threshold crossing tidak terpicu noise 1 sampel. */
   double acIRSmooth = acIRSmoothPrev * 0.7 + acIR * 0.3;
 
@@ -375,28 +413,126 @@ static void detect_beat(double acIR) {
 
   /* Threshold dihitung dari envelope SEBELUM update sampel ini: kalau envelope
    * ikut naik memakai puncak sampel yang sedang dievaluasi, threshold akan
-   * "mengejar" persis di puncak yang sama dan menggagalkan crossing. */
-  double threshold = peakEnvelope * 0.5;
+   * "mengejar" persis di puncak yang sama dan menggagalkan crossing.
+   *
+   * Rasio TURUN dari 0,5 ke 0,35 (diport dari no_touch-callibration/,
+   * 2026-09-27, wear-test bersih setelah fix proses capture serial): pada
+   * sesi yang sudah dipastikan bersih dari gangguan eksternal, 4 dari 6 detak
+   * dalam satu putaran MASIH butuh koreksi missed-split, dengan ibi mentah
+   * 1768-1994ms padahal acuan HP menyiratkan ~700ms -- itu 2-3 detak hilang
+   * BERTURUT-TURUT, melebihi yang bisa dipulihkan missed-split (yang cuma
+   * memulihkan SATU detak hilang). Menurunkan threshold adalah perbaikan
+   * akar, bukan tambal-sulam lagi, dan sekarang lebih aman dicoba karena ada
+   * dua jaring pengaman yang sudah terbukti jalan: missed-split (menolong
+   * kalau masih ada yang lolos) dan noise-ignored (menolak crossing palsu
+   * kalau threshold turun ini malah menangkap notch/derau). */
+  double threshold = peakEnvelope * 0.35;
 
   unsigned long nowMs = millis();
   bool rising = cardiac > threshold && cardiacPrev <= threshold;
 
   if (rising && (nowMs - lastBeatMs) > MIN_IBI_MS) {
     unsigned long ibi = nowMs - lastBeatMs;
-    if (lastBeatMs != 0 && ibi < 2000) {   /* buang IBI pertama & <30bpm */
-      ibiHistory[ibiIndex] = ibi;
-      ibiIndex = (ibiIndex + 1) % 4;
+
+    double avgIbiBefore = 0;
+    for (int i = 0; i < IBI_HISTORY_N; i++) avgIbiBefore += ibiHistory[i];
+    avgIbiBefore /= IBI_HISTORY_N;
+
+    /* Tolak crossing yang jauh LEBIH CEPAT dari rata-rata terbaru (diport
+     * dari no_touch-callibration/, 2026-09-27, dibuktikan lewat wear-test
+     * "diam" dengan patch missed-split di atas sudah aktif: ibi 406ms &
+     * 483ms muncul berdampingan dengan ibi 1524-1944ms dalam SATU sesi
+     * ~10 detik -- mustahil fisiologis untuk detak-ke-detak saat istirahat.
+     * Ciri khasnya crossing KEDUA dari siklus kardiak yang SAMA (mis. notch
+     * dicrotic ikut melewati threshold), bukan detak jantung baru. Simetris
+     * dengan koreksi detak-terlewat di bawah tapi arah sebaliknya: crossing
+     * ini DIABAIKAN sepenuhnya (bukan digabung ke ibiHistory) dan lastBeatMs
+     * TIDAK diperbarui -- supaya detak asli berikutnya tetap dihitung dari
+     * detak asli sebelumnya, bukan dari crossing palsu ini. Tanpa penolakan
+     * ini, crossing palsu seperti itu ikut menaikkan rata-rata bergulir dan
+     * menutupi sisa error "meleset-bawah" yang justru mau diperbaiki gerbang
+     * detak-terlewat. */
+    bool looksLikeNoise = stableBeatCount >= 2 && lastBeatMs != 0
+                        && (double)ibi < avgIbiBefore * 0.6;
+
+    if (!looksLikeNoise && lastBeatMs != 0 && ibi < 2000) {   /* buang IBI pertama & <30bpm */
+      /* Koreksi detak terlewat (diport dari no_touch-callibration/,
+       * dibuktikan wear-test 2026-09-27 lewat log [ppg-beat]): sinyal wrist
+       * kadang jatuh mendekati noise floor selama 1-2 detak (cardiac &
+       * envelope bisa ambruk >10x lalu pulih -- lihat cardiac=344.9 -> 30.5
+       * pada satu sesi nyata), dan selama jatuh itu SATU detak bisa gagal
+       * melewati threshold. Akibatnya ibi berikutnya ~2x ibi normal, dan
+       * rata-rata bergulir 4-slot lama menghitung BPM kira-kira SEPARUH
+       * nilai asli -- persis pola yang dilaporkan (jam 63/66/75 vs HP
+       * 67/89/92 pada sesi yang sama).
+       *
+       * Detak jantung tidak realistis melambat 2x lalu kembali normal dalam
+       * satu denyut di keadaan diam -- itu ciri detak hilang, bukan
+       * fisiologi. Kalau gap ini cocok pola itu (mendekati 2x rata-rata
+       * ibi terakhir, dan separuhnya masih di atas refractory MIN_IBI_MS),
+       * pecah jadi dua entri sama panjang alih-alih satu entri panjang --
+       * mengoreksi BPM balik ke laju asli tanpa perlu menurunkan threshold
+       * (yang berisiko menangkap noise sebagai detak baru ke arah
+       * sebaliknya). Gerbang stableBeatCount>=2 supaya slot awal default
+       * 600ms tidak dianggap "rata-rata" yang berarti.
+       *
+       * Batas bawah 1,6x -> 1,4x (2026-09-27, setelah fix slowInit di atas
+       * menghilangkan lock separuh-laju yang persisten): sesi wear-test
+       * lanjutan tanpa lock itu masih terbaca konsisten SEDIKIT lebih RENDAH
+       * daripada HP (mis. 67/79/68 vs 83/85/76 -- semuanya lebih rendah,
+       * tidak pernah lebih tinggi), yang berarti sisa kesalahannya masih
+       * satu arah (meleset-bawah), bukan derau acak dua arah. Variasi
+       * detak-ke-detak asli saat diam jarang melebihi ~30%, jadi 1,4x masih
+       * aman dari HRV wajar sambil menangkap lebih banyak kasus "sedikit
+       * terlambat, bukan tepat 2x" yang lolos dari gerbang 1,6x lama. */
+      bool missedBeat = stableBeatCount >= 2
+                       && (double)ibi > avgIbiBefore * 1.4
+                       && (double)ibi < avgIbiBefore * 2.6
+                       && (ibi / 2) > MIN_IBI_MS;
+
+      if (missedBeat) {
+        unsigned long halfIbi = ibi / 2;
+        ibiHistory[ibiIndex] = halfIbi;
+        ibiIndex = (ibiIndex + 1) % IBI_HISTORY_N;
+        ibiHistory[ibiIndex] = halfIbi;
+        ibiIndex = (ibiIndex + 1) % IBI_HISTORY_N;
+        beatCount = (beatCount < 0xFFFE) ? (beatCount + 2) : 0xFFFF;
+      } else {
+        ibiHistory[ibiIndex] = ibi;
+        ibiIndex = (ibiIndex + 1) % IBI_HISTORY_N;
+        if (beatCount < 0xFFFF) beatCount++;
+      }
 
       double avgIbi = 0;
-      for (int i = 0; i < 4; i++) avgIbi += ibiHistory[i];
-      avgIbi /= 4.0;
+      for (int i = 0; i < IBI_HISTORY_N; i++) avgIbi += ibiHistory[i];
+      avgIbi /= IBI_HISTORY_N;
 
       currentBPM = 60000.0 / avgIbi;
       bpmValid = true;
       if (stableBeatCount < MIN_STABLE_BEATS) stableBeatCount++;
-      if (beatCount < 0xFFFF) beatCount++;
+
+#if NET_DEBUG
+      /* Diagnostik kalibrasi BPM wrist vs jari (diport dari
+       * no_touch-callibration/, 2026-09-27). Cetak ibi mentah + amplitudo
+       * cardiac di titik crossing supaya bisa dibaca berdampingan dengan BPM
+       * HP saat wear-test. Hapus/nonaktifkan (atau pindah ke gerbang waktu
+       * seperti log PI/R di accumulate_spo2) setelah kalibrasi board ini
+       * selesai -- ini mencetak TIAP detak, jauh lebih berisik daripada log
+       * 1x/2 detik yang sudah ada. */
+      Serial.printf("[ppg-beat] ibi=%lums%s bpm=%.1f cardiac=%.1f thr=%.1f env=%.1f\n",
+                    ibi, missedBeat ? "(missed-split)" : "",
+                    currentBPM, cardiac, threshold, peakEnvelope);
+#endif
     }
-    lastBeatMs = nowMs;
+
+    if (looksLikeNoise) {
+#if NET_DEBUG
+      Serial.printf("[ppg-beat] ibi=%lums(noise-ignored) cardiac=%.1f thr=%.1f\n",
+                    ibi, cardiac, threshold);
+#endif
+    } else {
+      lastBeatMs = nowMs;
+    }
   }
 
   double absVal = fabs(cardiac);
