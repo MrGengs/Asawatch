@@ -421,6 +421,34 @@ static void ukur_batal_lokal(void) {
   kirim_status();
 }
 
+/* Hentikan pengukuran APA PUN tanpa menghasilkan apa pun (protokol v1.6,
+ * BATAL_UKUR; juga BATAL_SESI untuk pengukuran milik sesinya). Bukan
+ * ukur_selesai(false), dan bedanya penting -- sama dengan jam_siap_mati():
+ *
+ *   - tidak ada paket Sampel, walau sebagian metrik sudah terbaca: pengguna
+ *     yang menekan "Hentikan" tidak meminta setengah hasil;
+ *   - tidak ada UKUR_GAGAL: sensornya tidak gagal, penggunanya yang berhenti;
+ *   - bit dedup TIDAK dinyalakan dan tombol ARM_TITIK TIDAK dipadamkan, jadi
+ *     titik yang sama masih bisa diukur ulang lewat UKUR atau tombolnya.
+ *
+ * Index 1 milik sesi yang RUNNING ditandai selesai, karena kalau tidak
+ * jam_putar() memulainya lagi pada putaran berikutnya dan pembatalannya tidak
+ * pernah terlihat. Aplikasi yang menginginkannya tetap bisa meminta lewat UKUR.
+ * Mengembalikan false bila memang tidak ada yang sedang diukur. */
+static bool ukur_batal(const char *sebab) {
+  if (!s_ukur_aktif) return false;
+  ppg_set_enabled(false);
+  if (s_ukur_titik_sesi && s_ukur_index == 1 && s_status == AW_SESI_RUNNING &&
+      memcmp(s_ukur_sesi, s_sesi_id, 16) == 0)
+    s_idx1_selesai = true;
+  s_ukur_aktif = false;
+  s_ukur_lokal = false;
+  Serial.printf("[ukur] index %u dibatalkan (%s), MAX30105 dimatikan\n",
+                (unsigned)s_ukur_index, sebab);
+  kirim_status();
+  return true;
+}
+
 static void ukur_selesai(bool lengkap) {
   /* MAX30105 dipadamkan begitu datanya lengkap -- ini yang membuat LED tidak
    * menyala terus-menerus. Dua LED pada arus penuh 100 Hz menyedot puluhan mA
@@ -927,12 +955,47 @@ static void jalankan_perintah(const aw_perintah_t *p) {
 
     case AW_OP_BATAL_SESI: {
       if (narg < 16) { nak(AW_NAK_PAYLOAD_INVALID); return; }
-      if (s_status == AW_SESI_IDLE || !sesi_cocok(arg)) {
-        nak(AW_NAK_SESI_TAK_DIKENAL);
+      /* v1.6: sesi yang dibatalkan dari aplikasi MENGHENTIKAN JAM, bukan cuma
+       * mesin statusnya. Sampai v1.5 pengukuran milik sesi itu berjalan terus
+       * sampai tuntas dan sampelnya dikirim ke sesi yang sudah tidak ada -- dan
+       * sejak v1.3 jam hampir selalu IDLE (dimatikan di antara titik ukur), jadi
+       * perintah ini malah di-NAK 0x04 sementara LED-nya tetap menyala.
+       *
+       * Karena itu tiga hal diperiksa terpisah, masing-masing dengan sesiId
+       * miliknya sendiri, bukan s_sesi_id saja: pengukuran yang berjalan (UKUR
+       * membawa sesiId-nya sendiri dan tidak menyentuh s_sesi_id), tombol ukur
+       * yang ter-ARM, dan mesin status. */
+      bool kena = false;
+      if (s_ukur_aktif && !s_ukur_lokal && memcmp(s_ukur_sesi, arg, 16) == 0)
+        kena = ukur_batal("sesinya dibatalkan");
+      if (s_titik_ada && memcmp(s_titik_sesi, arg, 16) == 0) {
+        s_titik_ada = false;
+        aw_titik_hapus();
+        Serial.printf("[titik] sesi dibatalkan -- tombol ukur index %u dipadamkan\n",
+                      (unsigned)s_titik_index);
+        kena = true;
+      }
+      if (s_status != AW_SESI_IDLE && sesi_cocok(arg)) {
+        ack(op);
+        ke_idle();
         return;
       }
+      if (!kena) { nak(AW_NAK_SESI_TAK_DIKENAL); return; }
       ack(op);
-      ke_idle();
+      kirim_status();
+      return;
+    }
+
+    case AW_OP_BATAL_UKUR: {
+      /* "Hentikan pengukuran" dari aplikasi (v1.6, dokumen 5). Tanpa payload:
+       * hanya ada satu sensor, jadi tidak ada yang perlu dipilih.
+       *
+       * Selalu di-ACK, juga saat tidak ada yang sedang diukur -- pertanyaannya
+       * "apakah jam masih mengukur", bukan "apakah saya menghentikan sesuatu".
+       * ACK yang hilang membuat aplikasi mengulang, dan pengulangan itu tidak
+       * boleh dijawab NAK hanya karena percobaan pertama sudah berhasil. */
+      ukur_batal("diminta aplikasi");
+      ack(op);
       return;
     }
 
@@ -1328,6 +1391,12 @@ void jam_putar(void) {
     /* Dicatat dari LUAR fungsi penambah entri, supaya penambahan tidak
      * rekursif (dokumen 11 aturan 5). */
     aw_ring_tambah_event(AW_EV_BUFFER_PENUH, SESI_NOL, 0, aw_uptime_s());
+    /* Event itu sendiri butuh slot, jadi selagi penuh ia ikut menggusur satu
+     * entri dan menyalakan flag lagi. Tanpa ini flag tidak pernah padam: tiap
+     * putaran loop membuang satu entri sungguhan, menggantinya dengan
+     * BUFFER_PENUH, dan menulis ring ke NVS (~70 ms) -- loop melambat ke
+     * ~14 Hz sampai klik ganda PWR tidak lagi terdeteksi. */
+    (void)aw_ring_ambil_flag_penuh();
   }
 
   putar_pengirim();

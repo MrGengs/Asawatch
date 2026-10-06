@@ -198,6 +198,7 @@ mulai        MULAI_SESI   (jalankan dua kali untuk menguji idempotensi)
 ukur <idx>   UKUR index idx
 titik <idx>  ARM_TITIK index idx
 now          UKUR_SEKARANG
+henti        BATAL_UKUR   (v1.6 — hentikan pengukuran yang berjalan, tanpa hasil)
 tombol       tekan tombol fisik (bukan BLE — menguji dispatcher satu tombol)
 status       cetak keadaan jam
 id <1-99>    atur label uji manual (bukan protokol) — nama BLE jadi

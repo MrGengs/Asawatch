@@ -1317,6 +1317,12 @@ void jam_putar(void) {
     /* Dicatat dari LUAR fungsi penambah entri, supaya penambahan tidak
      * rekursif (dokumen 11 aturan 5). */
     aw_ring_tambah_event(AW_EV_BUFFER_PENUH, SESI_NOL, 0, aw_uptime_s());
+    /* Event itu sendiri butuh slot, jadi selagi penuh ia ikut menggusur satu
+     * entri dan menyalakan flag lagi. Tanpa ini flag tidak pernah padam: tiap
+     * putaran loop membuang satu entri sungguhan, menggantinya dengan
+     * BUFFER_PENUH, dan menulis ring ke NVS (~70 ms) -- loop melambat ke
+     * ~14 Hz sampai klik ganda PWR tidak lagi terdeteksi. */
+    (void)aw_ring_ambil_flag_penuh();
   }
 
   putar_pengirim();

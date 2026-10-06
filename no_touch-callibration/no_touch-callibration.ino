@@ -2641,6 +2641,7 @@ static void boot_aktifkan(void) {
  *   ukur <idx>   UKUR index idx
  *   titik <idx>  ARM_TITIK index idx
  *   now          UKUR_SEKARANG
+ *   henti        BATAL_UKUR  (hentikan pengukuran yang berjalan, v1.6)
  *   tombol       tekan tombol fisik (bukan BLE -- menguji jalur tombol)
  *   status       cetak keadaan jam
  *   lupa         lupakan titik ter-ARM paksa (BUKAN opcode protokol -- jalan
@@ -2790,6 +2791,7 @@ static void konsol_jalankan(char *baris) {
   else if (!strcmp(baris, "ukur"))  konsol_kirim(AW_OP_UKUR, true, true, (uint8_t)arg);
   else if (!strcmp(baris, "titik")) konsol_kirim(AW_OP_ARM_TITIK, true, true, (uint8_t)arg);
   else if (!strcmp(baris, "now"))   konsol_kirim(AW_OP_UKUR_SEKARANG, false, false, 0);
+  else if (!strcmp(baris, "henti")) konsol_kirim(AW_OP_BATAL_UKUR, false, false, 0);
   else if (!strcmp(baris, "lupa")) {
     /* Bukan opcode protokol -- fitur lokal murni, jalan pintas untuk titik
      * ter-ARM yang nyangkut (mis. sisa pengujian `titik N` di atas) tanpa

@@ -20,6 +20,12 @@ Masing-masing folder punya `CLAUDE.md` sendiri dengan detail lengkap:
 cara build & flash, protokol BLE, aturan konteks/thread, invarian yang
 tidak boleh dibalik, dan skrip generator aset.
 
+Pengolahan sinyal PPG (filtering, deteksi detak, formula SpO2/glukosa/tensi)
+dan status kalibrasi tiap metrik ada di
+[`docs/PENGOLAHAN-SINYAL.md`](docs/PENGOLAHAN-SINYAL.md), termasuk perbedaan
+antara DSP dasar (`no_touch/`) dan generasi kalibrasi
+(`no_touch-callibration/`, `touchscreen/`).
+
 ## Keamanan
 
 `config.h` di kedua varian memuat kredensial Wi-Fi dan API key

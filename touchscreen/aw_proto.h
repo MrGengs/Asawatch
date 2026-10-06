@@ -18,7 +18,7 @@
 
 /* ---------------- Versi ---------------- */
 #define AW_VERSI_MAYOR      1
-#define AW_VERSI_MINOR      5
+#define AW_VERSI_MINOR      6
 /* Dinaikkan manual tiap kali firmware dirilis. Aplikasi hanya melaporkannya,
  * tidak mengambil keputusan apa pun darinya. */
 #define AW_FIRMWARE_BUILD   1
@@ -90,6 +90,7 @@ typedef enum {
   AW_OP_ACK_EVENT     = 0x08,   /* 1B seq -- SATU-SATUNYA yang tidak dibalas */
   AW_OP_MULAI_SESI    = 0x09,   /* 16B sesiId -- tombol dari aplikasi (v1.2) */
   AW_OP_ARM_TITIK     = 0x0A,   /* 16B sesiId + 1B index -- nyalakan tombol ukur (v1.3) */
+  AW_OP_BATAL_UKUR    = 0x0B,   /* -- hentikan pengukuran yang berjalan (v1.6) */
 } aw_opcode_t;
 
 /* ---------------- Jenis peristiwa (dokumen 7) ---------------- */
