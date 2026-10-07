@@ -3254,6 +3254,16 @@ void setup() {
    * panjang di id_badge_tampilkan() kenapa tidak lebih awal. */
   id_badge_tampilkan();
 
+  /* Tenggat mati layar untuk boot dingin. s_layar_nyala mulai TRUE secara
+   * statis, jadi reset ini tidak pernah melihat layar bertransisi mati->nyala,
+   * dan layar_nyala_sementara() (yang cuma memasang tenggat pada transisi itu)
+   * tidak pernah dipanggil di jalur ini. Tanpa baris ini layar menyala
+   * selamanya setelah boot sampai diklik manual. Kalau ada badge nomor unit,
+   * tenggatnya disamakan dengan ID_BADGE_MS supaya layar langsung standby
+   * begitu badge selesai tampil. */
+  layar_mati_pada = millis() + (aw_label_get() ? (uint32_t)ID_BADGE_MS
+                                               : LAYAR_MATI_TOMBOL_MS);
+
   /* Koreksi halaman: splash_tutup() sudah memuat scr_home lebih dulu karena
    * urutan init ini WAJIB splash sebelum jam_mulai() (dokumen 13.4), jadi ia
    * tidak bisa tahu ada ARM_TITIK yang selamat lintas boot (dokumen 5 & 11).
