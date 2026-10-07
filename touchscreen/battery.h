@@ -32,7 +32,11 @@ void battery_update(void);
  * board ini bahwa tegangan pin dan sel jadi sama persis di titik itu), angka
  * langsung memakai tegangan mentah tanpa koreksi maupun jeda waktu. Saat di
  * baterai angkanya bergeser 1% per langkah menuju kurva(median) dan tidak
- * melompat waktu kabel dicabut. Rinciannya di battery.cpp dan config.h. */
+ * melompat waktu kabel dicabut. Rinciannya di battery.cpp dan config.h.
+ *
+ * Yang dikembalikan adalah nilai TAMPIL: persen internal 80-86% (tempat jam
+ * mentok setelah dicas penuh) direntang ke 90-100% -- lihat "peta TAMPIL" di
+ * battery.cpp. battery_set_tersimpan() menerima skala yang sama. */
 int battery_percent(void);
 
 /* Tegangan hasil penghalusan, dalam milivolt. */
