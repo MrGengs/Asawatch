@@ -770,9 +770,60 @@ int  battery_floor_mv(void)       { return s_base_mv; }
 int  battery_cv_detik(void)       { return (int)(s_cv_ms / 1000UL); }
 const char *battery_sebab_mengisi(void) { return s_sebab; }
 void battery_usb_pasti(void)            { s_usb_bukti = true; }
-void battery_set_tersimpan(int pct)     { s_tersimpan = pct; }
+/* ---- peta TAMPIL: persen internal -> persen yang dilihat pemakai/aplikasi ----
+ *
+ * Laporan lapangan (semua unit tanpa-sentuh, bukan satu jam): dicas 2 jam
+ * angkanya MENTOK di 82-86% dan tidak pernah naik lagi. Penyebab yang paling
+ * cocok dengan kodenya: plateau charger di board ini, sebagaimana TERBACA lewat
+ * BATT_DIVIDER pinjaman touchscreen/, berada di bawah BATT_CV_PLATEAU_MIN_MV,
+ * jadi cabang `cv` tidak pernah menyala dan persen terus dihitung dari
+ * kurva(basis - s_chg_ir_mv) -- ~4,10 V dikurangi ~100 mV = ~4,00 V = 85%.
+ * Selama dua jam itu sel kecil ini sudah penuh, jadi 82-86% internal artinya
+ * "penuh" di board ini.
+ *
+ * Sengaja dikoreksi di KELUARAN, bukan dengan menggeser CURVE/BATT_CV_MV:
+ * tanpa multimeter di board ini tidak diketahui mana yang meleset (rasio
+ * pembagi atau titik henti charger), sedangkan gejalanya terukur langsung di
+ * angka persen. Bagian bawah dibiarkan identitas (<= 60%) supaya ambang
+ * AW_BATERAI_KRITIS_PCT dan perilaku saat terkuras tidak berubah:
+ *     internal  0..60  -> tampil  0..60   (sama)
+ *     internal 60..82  -> tampil 60..90   (direntang)
+ *     internal 82..86  -> tampil 90..100
+ *     internal   > 86  -> tampil 100
+ * Kalau nanti BATT_DIVIDER/CURVE dikalibrasi ulang dengan multimeter dan
+ * charger penuh terbaca ~100% secara internal, peta ini harus dibuang --
+ * kalau tidak, 86% yang sungguhan ikut tampil 100%.
+ *
+ * Nilai yang disimpan ke NVS adalah nilai TAMPIL (battery_percent()), jadi
+ * battery_set_tersimpan() membaliknya ke skala internal sebelum dibandingkan
+ * dengan hitungan tegangan saat boot. */
+#define TAMPIL_LUTUT_INT   60   /* di bawah ini tidak disentuh            */
+#define TAMPIL_PENUH_A_INT 82   /* internal -> tampil 90                   */
+#define TAMPIL_PENUH_B_INT 86   /* internal -> tampil 100                  */
+
+static int ke_tampil(int p) {
+  if (p <= TAMPIL_LUTUT_INT)   return p;
+  if (p <= TAMPIL_PENUH_A_INT) return TAMPIL_LUTUT_INT +
+      ((p - TAMPIL_LUTUT_INT) * (90 - TAMPIL_LUTUT_INT) + (TAMPIL_PENUH_A_INT - TAMPIL_LUTUT_INT) / 2) /
+      (TAMPIL_PENUH_A_INT - TAMPIL_LUTUT_INT);
+  if (p <  TAMPIL_PENUH_B_INT) return 90 +
+      ((p - TAMPIL_PENUH_A_INT) * 10 + (TAMPIL_PENUH_B_INT - TAMPIL_PENUH_A_INT) / 2) /
+      (TAMPIL_PENUH_B_INT - TAMPIL_PENUH_A_INT);
+  return 100;
+}
+
+static int dari_tampil(int d) {
+  if (d <= TAMPIL_LUTUT_INT) return d;
+  if (d <= 90) return TAMPIL_LUTUT_INT +
+      ((d - TAMPIL_LUTUT_INT) * (TAMPIL_PENUH_A_INT - TAMPIL_LUTUT_INT) + (90 - TAMPIL_LUTUT_INT) / 2) /
+      (90 - TAMPIL_LUTUT_INT);
+  if (d > 100) d = 100;
+  return TAMPIL_PENUH_A_INT + ((d - 90) * (TAMPIL_PENUH_B_INT - TAMPIL_PENUH_A_INT) + 5) / 10;
+}
+
+void battery_set_tersimpan(int pct)     { s_tersimpan = pct > 0 ? dari_tampil(pct) : 0; }
 bool battery_charging(void)       { return s_charging; }
-int  battery_percent(void)        { return s_percent; }
+int  battery_percent(void)        { return ke_tampil(s_percent); }
 int  battery_millivolts(void)     { return s_batt_mv; }
 int  battery_raw_millivolts(void) { return s_raw_mv; }
 bool battery_valid(void)          { return s_valid; }
